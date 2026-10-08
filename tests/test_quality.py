@@ -71,6 +71,70 @@ def test_blank_frame_is_not_export_eligible():
     assert not candidates[0]["eligible"]
 
 
+def test_empty_dithered_gradient_is_not_a_worthwhile_scene():
+    # Smooth backgrounds can acquire Laplacian energy from quantization or
+    # dithering while containing no subject, graphics, or text to represent.
+    y, x = np.indices((540, 960))
+    gradient = np.tile(np.linspace(145, 225, 960), (540, 1))
+    dithering = (((x + 3*y) % 5) - 2) * 0.5
+    gray = np.clip(gradient + dithering, 0, 255).astype(np.uint8)
+    frame = np.repeat(gray[:, :, None], 3, axis=2)
+    assert core.sharpness(frame) > 1
+    assert not cv2.Canny(gray, 50, 150).any()
+    candidates = [candidate(0, frame), candidate(1, frame)]
+    scene = {"id": 0, "start_frame": 0, "end_frame": 1, "start": 0, "end": 2/24}
+    core._score_candidates(candidates, [scene], {"width": 960, "height": 540, "fps": 24})
+    assert all(not item["eligible"] for item in candidates)
+
+
+def test_low_key_subject_is_not_rejected_for_a_soft_featureless_background():
+    image = np.full((540, 960, 3), 18, np.uint8)
+    cv2.ellipse(image, (160, 200), (75, 90), 0, 0, 360, (35, 35, 35), -1)
+    cv2.circle(image, (140, 180), 6, (5, 5, 5), -1)
+    cv2.circle(image, (180, 180), 6, (5, 5, 5), -1)
+    cv2.putText(image, "NIGHT", (120, 250), cv2.FONT_HERSHEY_SIMPLEX, 1.8, (45, 45, 45), 3)
+    subject = {"faces": [{"box": [80, 100, 160, 200], "confidence": 1,
+                           "open_eyes": 0.95, "smile": 0.1, "sharpness": 100}], "text": []}
+    candidates = [candidate(10, image, vision=subject)]
+    score(candidates)
+    assert candidates[0]["eligible"]
+
+
+def _ui_transition_sequence(settled=False):
+    scenes = [
+        {"id": 0, "start_frame": 0, "end_frame": 47, "start": 0, "end": 2},
+        {"id": 1, "start_frame": 48, "end_frame": 63, "start": 2, "end": 64/24},
+        {"id": 2, "start_frame": 64, "end_frame": 119, "start": 64/24, "end": 5},
+    ]
+    candidates = []
+    for scene_id, indexes in [(0, [10, 20, 30]), (1, [50, 54, 58]), (2, [70, 80, 90])]:
+        for position, index in enumerate(indexes):
+            text_x = (80 + 180*position) if scene_id == 1 and not settled else 80
+            item = candidate(index, title_frame(), scene_id, text_detection(text_x))
+            item["metrics"]["sharpness"] = 60 if scene_id == 1 else 180
+            candidates.append(item)
+    core._score_candidates(candidates, scenes, {"width": 960, "height": 540, "fps": 24})
+    return candidates, scenes
+
+
+def test_short_unsettled_ui_transition_is_not_promoted_to_mandatory_scene_coverage():
+    candidates, scenes = _ui_transition_sequence()
+    transition = [item for item in candidates if item["scene_id"] == 1]
+    assert all(not item["eligible"] for item in transition)
+    selected, _ = core.select_candidates(candidates, scenes, 6)
+    assert not set(selected).intersection(item["id"] for item in transition)
+    assert all(any(item["scene_id"] == scene_id and item["id"] in selected for item in candidates)
+               for scene_id in (0, 2))
+
+
+def test_short_settled_title_is_preserved_even_between_more_detailed_scenes():
+    candidates, scenes = _ui_transition_sequence(settled=True)
+    short_title = [item for item in candidates if item["scene_id"] == 1]
+    assert any(item["eligible"] for item in short_title)
+    selected, _ = core.select_candidates(candidates, scenes, 6)
+    assert set(selected).intersection(item["id"] for item in short_title)
+
+
 def test_open_eyes_outweigh_a_large_smile_during_a_blink():
     face = {"box": [300, 100, 160, 200], "confidence": 1, "sharpness": 80}
     opened = {"faces": [dict(face, open_eyes=0.97, smile=0.02)], "text": []}

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "extract-stills"
-version = "2.0.0b1"
+version = "2.0.0b2"
 description = "Offline, scene-aware still extraction with a desktop GUI and CLI"
 requires-python = ">=3.12,<3.13"
 license = "MIT"

@@ -69,7 +69,7 @@ jobs:
           ./configure --prefix="$GITHUB_WORKSPACE/ffmpeg" --disable-debug --disable-doc --disable-ffplay --disable-shared --enable-static --enable-gpl --enable-libx264 --enable-libzimg --enable-lcms2
           make -j3
           make install
-          cp LICENSE COPYING.* "$GITHUB_WORKSPACE/ffmpeg/"
+          cp LICENSE.md COPYING.* "$GITHUB_WORKSPACE/ffmpeg/"
           printf '%s\n' 'FFmpeg 7.1.1 source: https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz' 'SHA256: 733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1' 'Build configuration is recorded in FFMPEG-BUILD.txt; external Homebrew library versions are runner-dependent.' > "$GITHUB_WORKSPACE/ffmpeg/SOURCE.txt"
           echo "$GITHUB_WORKSPACE/ffmpeg/bin" >> "$GITHUB_PATH"
       - name: Provision and verify pinned offline models

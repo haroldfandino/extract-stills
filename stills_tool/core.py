@@ -208,7 +208,7 @@ def _cheap_metrics(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     return {"sharpness": sharpness(frame), "mean_luma": float(gray.mean()),
             "dark_fraction": float(np.mean(gray < 5)), "clipped_fraction": float(np.mean(gray > 250)),
-            "contrast": float(gray.std())}
+            "contrast": float(gray.std()), "edge_fraction": float(np.mean(cv2.Canny(gray, 60, 120) > 0))}
 
 
 def _write_preview(path, frame):
@@ -379,7 +379,9 @@ def _score_candidates(candidates, scenes, video):
             region = min(1, float(np.mean(region_values)) / scale) if region_values else sharp
             severe_softness = (metrics["sharpness"] < 1.0 and max(region_values, default=0) < 20)
             exposure_penalty = min(12, metrics["clipped_fraction"] * 20)
-            blank = metrics["contrast"] < 2
+            uninformative = (metrics.get("edge_fraction", 1) < 0.0002
+                             and not faces and not vision.get("text"))
+            blank = metrics["contrast"] < 2 or uninformative
             transition = (min(candidate["frame_index"] - scene["start_frame"],
                               scene["end_frame"] - candidate["frame_index"]) < 2 and len(group) > 3)
             score = 40 + 28 * sharp + 12 * region + 12 * stable + 8 * eyes + 2 * smile
@@ -412,6 +414,27 @@ def _score_candidates(candidates, scenes, video):
                 candidate["reasons"].append("Sharp, stable candidate")
             candidate["metrics"].update(text_stability=round(stable, 3),
                                         open_eyes=round(eyes, 3), smile=round(smile, 3))
+    # Camera and UI animation can split a transition into its own short scene.
+    # Such a scene must not force a blurred/fading still into the coverage quota.
+    grouped = [[c for c in candidates if c["scene_id"] == scene["id"]] for scene in scenes]
+    for position, (scene, group) in enumerate(zip(scenes, grouped)):
+        if not group:
+            continue
+        duration = scene.get("end", (scene["end_frame"] + 1) / video.get("fps", 24))
+        duration -= scene.get("start", scene["start_frame"] / video.get("fps", 24))
+        text_group = [c for c in group if c["vision"].get("text")]
+        neighbors = [grouped[i] for i in (position - 1, position + 1) if 0 <= i < len(grouped)]
+        reference = max((float(np.percentile([c["metrics"]["sharpness"] for c in n], 85))
+                         for n in neighbors if n), default=0)
+        unsettled = (text_group and len(text_group) >= len(group) / 2 and
+                     float(np.median([c["metrics"]["text_stability"] for c in text_group])) < 0.6)
+        if (duration < 1 and unsettled and
+                max(c["metrics"]["sharpness"] for c in group) < reference * 0.6):
+            for candidate in group:
+                candidate["eligible"] = False
+                candidate["score"] = min(candidate["score"], 49)
+                candidate["tier"] = "Low"
+                candidate["reasons"].append("Unsettled transition between sharper scenes")
 
 
 def _near_match(first, second):
@@ -589,7 +612,7 @@ def analyze_video(path, options=None, progress=None, cancel=None):
         selected, target = select_candidates(candidates, scenes, base, options.count, end_id)
         if len(selected) < target:
             warnings.append(f"Selected {len(selected)} distinct eligible frames; target was {target}.")
-        analysis = {"schema_version": 1, "scoring_version": "2.0-b1",
+        analysis = {"schema_version": 1, "scoring_version": "2.0-b2",
                     "source": str(source), "source_fingerprint": identity, "video": video,
                     "analysis_dir": str(directory), "scenes": scenes, "candidates": candidates,
                     "selected_ids": selected, "end_card_id": end_id,
