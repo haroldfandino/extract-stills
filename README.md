@@ -1,6 +1,8 @@
 # Extract Stills V2
 
-Offline, scene-aware still selection for Windows x64 and Apple Silicon macOS 13+. Smart extraction is the default; the original every-24-frames extractor remains available as Legacy mode. V2 is a beta on the codex/v2.0 branch. Main contains the unchanged V1 baseline.
+Offline, scene-aware still selection for Windows x64 and Apple Silicon Macs. Smart extraction is the default; the original every-24-frames extractor remains available as Legacy mode. V2 is a beta on the codex/v2.0 branch. Main contains the unchanged V1 baseline.
+
+The current Mac development bundle is tested on macOS 15 and contains dependencies requiring macOS 15. Support for macOS 13 remains a stable-release target; use the current Mac bundle on macOS 15 or newer.
 
 ## Desktop app
 

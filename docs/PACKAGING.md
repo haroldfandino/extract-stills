@@ -20,7 +20,7 @@ Create a virtual environment, install `requirements-dev.txt`, and fetch the mode
 
 Windows outputs `dist/gui/Extract Stills/Extract Stills.exe` and `dist/cli/extract-stills/extract-stills.exe`. Mac outputs `dist/gui/Extract Stills.app` and `dist/cli/extract-stills/extract-stills`. Distinct directories prevent the console and GUI builds from overwriting one another. `--target cli` or `--target gui` builds one entry point. Icons are taken from `assets/icon.ico` or `assets/icon.icns` when present.
 
-The verifier generates its own small FFV1 test clip, runs the frozen console from a temporary working directory, restricts PATH, checks model hashes and bundled notices, and verifies exported resolution, PNG bit depth, ICC profiles, and unchanged input. An optional GUI smoke test runs Qt offscreen and checks the frozen desktop's legacy worker. Proxy settings discourage network access; this does not constitute network isolation. Repeat extraction with networking disabled on a clean machine without Python or system FFmpeg before release.
+The verifier generates its own small FFV1 test clip, runs the frozen console from a temporary working directory, restricts PATH, checks model hashes and bundled notices, and verifies original resolution, 8-bit PNG, 16-bit RGB TIFF, embedded ICC profiles, and unchanged input. An optional GUI smoke test runs Qt offscreen and checks the frozen desktop's legacy worker. Proxy settings discourage network access; this does not constitute network isolation. Repeat extraction with networking disabled on a clean machine without Python or system FFmpeg before release.
 
 ## macOS support and signing
 

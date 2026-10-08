@@ -43,6 +43,31 @@ def validate_png(path: Path) -> None:
     raise ValueError(f"Default sRGB PNG has no embedded ICC profile: {path.name}")
 
 
+def validate_tiff(path: Path, expected_size: tuple[int, int] = (160, 90)) -> None:
+    data = path.read_bytes()
+    endian = "<" if data[:2] == b"II" else ">" if data[:2] == b"MM" else None
+    if not endian or struct.unpack(endian + "H", data[2:4])[0] != 42:
+        raise ValueError(f"Invalid classic TIFF header: {path.name}")
+    offset = struct.unpack(endian + "I", data[4:8])[0]
+    count = struct.unpack(endian + "H", data[offset:offset + 2])[0]
+    tags = {}
+    for index in range(count):
+        entry = offset + 2 + index * 12
+        tag, dtype, length = struct.unpack(endian + "HHI", data[entry:entry + 8])
+        if tag not in (256, 257, 258, 34675):
+            continue
+        size = {1: 1, 3: 2, 4: 4, 7: 1}.get(dtype)
+        if not size:
+            raise ValueError(f"Unsupported TIFF verification tag type: {dtype}")
+        start = entry + 8 if size * length <= 4 else struct.unpack(endian + "I", data[entry + 8:entry + 12])[0]
+        raw = data[start:start + size * length]
+        tags[tag] = raw if dtype == 7 else list(struct.unpack(endian + {1: "B", 3: "H", 4: "I"}[dtype] * length, raw))
+    if tags.get(256) != [expected_size[0]] or tags.get(257) != [expected_size[1]] or tags.get(258) != [16, 16, 16]:
+        raise ValueError(f"Incorrect original resolution or 16-bit RGB TIFF samples: {path.name}")
+    if not isinstance(tags.get(34675), bytes) or tags[34675][36:40] != b"acsp":
+        raise ValueError(f"TIFF has no valid embedded ICC profile: {path.name}")
+
+
 def run(command: list[str], cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess:
     result = subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=240)
     if result.returncode:
@@ -138,12 +163,17 @@ def main() -> int:
             original = digest(fixture)
             version = run([str(cli), "--version"], cwd, env).stdout.strip()
             extraction = run([str(cli), "extract", str(fixture), "--json", "--output", str(cwd / "output"), "--report"], cwd, env)
-            json.loads(extraction.stdout)
+            extracted = json.loads(extraction.stdout)
             images = list((cwd / "output").rglob("*.png"))
             if not images:
                 raise ValueError("Packaged extraction produced no PNG images.")
             for image in images:
                 validate_png(image)
+            result = extracted["results"][0]
+            tiff_export = run([str(cli), "export", result["analysis"], "--frames", str(result["files"][0]["frame_index"]),
+                               "--format", "tiff", "--bit-depth", "16", "--output", str(cwd / "output_tiff"), "--json"], cwd, env)
+            tiff_result = json.loads(tiff_export.stdout)["results"][0]
+            validate_tiff(Path(tiff_result["files"][0]["path"]))
             if digest(fixture) != original:
                 raise ValueError("Extraction modified its source fixture.")
             if args.gui:
@@ -162,6 +192,7 @@ def main() -> int:
             payload = {"status": "passed", "version": version, "images": len(images),
                               "restricted_path": True, "source_preserved": True,
                               "original_resolution": True, "png_8bit_icc_verified": True,
+                              "tiff_16bit_icc_verified": True,
                               "offline_assets_verified": True, "gui_smoke_test": bool(args.gui)}
             if sys.platform == "darwin":
                 payload["macos_dependency_audit"] = macos_audit([cli] + ([args.gui.resolve()] if args.gui else []))
