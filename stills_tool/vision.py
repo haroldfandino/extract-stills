@@ -204,6 +204,12 @@ class LocalVision:
             regions = self._text(frame_bgr, cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY))
         if not regions:
             return []
+        self._load_text_recognizer()
+        from .text_appearance import attach_text_appearance
+
+        return attach_text_appearance(frame_bgr, self._recognizer.recognize(frame_bgr, regions))
+
+    def _load_text_recognizer(self) -> None:
         if self._recognizer is None:
             try:
                 from .text_ocr import TextRecognizer
@@ -213,7 +219,16 @@ class LocalVision:
             except Exception as exc:
                 raise MissingModelsError(f"Could not load the offline CPU text recognizer: {exc}. "
                                          f"{self._model_hint}") from exc
-        return self._recognizer.recognize(frame_bgr, regions)
+
+    def enrich_recognition_from_appearance(self, regions: list[dict],
+                                          coordinate_scale: tuple[float, float] = (1, 1)) -> list[dict]:
+        """Read character probabilities from verified cached native color crops."""
+        if self._closed:
+            raise RuntimeError("LocalVision has been closed")
+        if not regions:
+            return []
+        self._load_text_recognizer()
+        return self._recognizer.enrich_from_appearance(regions, coordinate_scale)
 
     def refine_text_regions(self, frame_bgr: np.ndarray, regions: list[dict]) -> list[dict]:
         """Redetect native text bands whose preview boxes can cut whole words.

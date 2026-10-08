@@ -185,6 +185,10 @@ def test_real_native_ocr_three_short_titles_exceed_duration_base_count(tmp_path)
     assert analysis["base_target"] == 2
     assert [state["text"] for state in analysis["text_states"]] == [["alpha"], ["bravo"], ["clear"]]
     assert len(analysis["selected_ids"]) == analysis["target"] == 3
+    stored = json.loads((Path(analysis["analysis_dir"]) / "analysis.json").read_text())
+    appearances = [region["appearance"] for candidate in stored["candidates"]
+                   for region in candidate["vision"]["text"] if "appearance" in region]
+    assert appearances and all("data" not in evidence for evidence in appearances)
     result = core.export_analysis(analysis, Options(report=True))
     assert result["selected_count"] == 3
     assert {tuple(file["recognized_text"]) for file in result["files"]} == {("alpha",), ("bravo",), ("clear",)}

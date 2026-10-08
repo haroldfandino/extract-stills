@@ -15,6 +15,8 @@ import math
 import re
 import unicodedata
 
+from .text_appearance import same_text_appearance
+from .text_pattern import text_pattern_evidence
 
 MIN_CONFIDENCE = 0.55
 MIN_CONTRAST = 0.08
@@ -104,14 +106,68 @@ def _fragment_of(shorter: str, longer: str) -> bool:
 
 def _canonical_lines(regions: list[dict]) -> list[dict]:
     """Join only neighboring OCR segments on the same visual baseline."""
+    contained = set()
+    for index, child in enumerate(regions):
+        x, y, width, height = child["box"]
+        for parent in regions:
+            if child is parent or not child["text"] or not parent["text"]:
+                continue
+            px, py, pw, ph = parent["box"]
+            if pw * ph <= width * height * 1.10:
+                continue
+            intersection = max(0, min(x + width, px + pw) - max(x, px))
+            intersection *= max(0, min(y + height, py + ph) - max(y, py))
+            if intersection / max(1, width * height) < 0.90:
+                continue
+            if abs(y + height / 2 - py - ph / 2) > min(height, ph) * 0.35:
+                continue
+            if child["text"] not in parent["text"]:
+                continue
+            child_capsule, parent_capsule = child.get("appearance", {}), parent.get("appearance", {})
+            if not child_capsule.get("available") or not parent_capsule.get("available"):
+                continue
+            glyph = child_capsule.get("glyph_bounds")
+            bounds = parent_capsule.get("bounds", [])
+            if not glyph or len(bounds) != 4 or not (
+                bounds[0] <= glyph[0] < glyph[2] <= bounds[2]
+                and bounds[1] <= glyph[1] < glyph[3] <= bounds[3]
+            ):
+                continue
+            parent_overlap = dict(parent)
+            parent_overlap["appearance"] = dict(parent_capsule, glyph_bounds=list(glyph))
+            if same_text_appearance(parent_overlap, child):
+                contained.add(index)
+                break
+    regions = [region for index, region in enumerate(regions) if index not in contained]
+    unique = []
+    for region in sorted(regions, key=lambda item: item["confidence"], reverse=True):
+        x, y, width, height = region["box"]
+        duplicate = False
+        for other in unique:
+            ox, oy, ow, oh = other["box"]
+            intersection = max(0, min(x + width, ox + ow) - max(x, ox))
+            intersection *= max(0, min(y + height, oy + oh) - max(y, oy))
+            fraction = intersection / max(1, min(width * height, ow * oh))
+            if fraction >= 0.75 and same_text_appearance(region, other):
+                duplicate = True
+                break
+        if not duplicate:
+            unique.append(region)
     rows = []
-    for region in sorted(regions, key=lambda item: (item["box"][1] + item["box"][3] / 2, item["box"][0])):
+    for region in sorted(unique, key=lambda item: (item["box"][1] + item["box"][3] / 2, item["box"][0])):
         x, y, width, height = region["box"]
         if not region["text"]:
             continue
         center = y + height / 2
-        matching = [row for row in rows
-                    if abs(row["center"] - center) <= 0.45 * min(row["height"], height)]
+        matching = [
+            row for row in rows
+            if abs(row["center"] - center) <= 0.45 * min(row["height"], height)
+            and any(
+                max(0, max(x, other["box"][0]) - min(x + width, other["box"][0] + other["box"][2]))
+                <= max(12, min(height, other["box"][3]) * 0.9)
+                for other in row["regions"]
+            )
+        ]
         if matching:
             row = min(matching, key=lambda item: abs(item["center"] - center))
         else:
@@ -136,6 +192,139 @@ def _canonical_lines(regions: list[dict]) -> list[dict]:
                 blocks.append({"text": region["text"], "box": region["box"], "regions": [region]})
         result.extend(blocks)
     return result
+
+
+def _appearance_consensus(entries: list[tuple[dict, dict]]) -> None:
+    """Resolve different OCR readings only when original glyph pixels agree."""
+    leaders, groups = [], []
+    for observation, region in entries:
+        if not region["text"] or not region.get("appearance", {}).get("available"):
+            continue
+        nearby = sorted(leaders, key=lambda pair: abs(
+            pair[0]["candidate"]["timestamp"] - observation["candidate"]["timestamp"],
+        ))
+        matching = next((other for _, other in nearby[:12] if same_text_appearance(region, other)), None)
+        if matching is not None:
+            group = groups[matching["appearance_class"]]
+            group["members"].append(region)
+            group["readings"].add(region["raw_text"])
+            region["appearance_class"] = matching["appearance_class"]
+            if region["text"] != matching["raw_text"]:
+                region["text"] = matching["raw_text"]
+                region["appearance_consensus"] = True
+        else:
+            # A fixed, first observed reading anchors each appearance class.
+            # Corrected alternatives never become proof references, so neither
+            # numeric substitutions nor chains of small changes can propagate.
+            region["appearance_class"] = len(groups)
+            leaders.append((observation, region))
+            groups.append({"text": region["raw_text"], "members": [region], "readings": {region["raw_text"]}})
+    alias_labels = {group["text"] for group in groups if len(group["readings"]) > 1}
+    collisions = {text for text in alias_labels if sum(group["text"] == text for group in groups) > 1}
+    for group in groups:
+        if group["text"] in collisions:
+            for region in group["members"]:
+                region["appearance_identity"] = (region["track"], region["appearance_class"])
+
+
+def _character_tokens(source: dict) -> list[tuple[str, list[float]]]:
+    characters = source.get("recognition_characters", [])
+    if not characters or source.get("recognition_details_match") is False:
+        return []
+    text = "".join(str(item.get("character", "")) for item in characters)
+    if normalize_text(text) != normalize_text(source.get("text", "")):
+        return []
+    tokens, letters, confidences = [], [], []
+    for item in characters:
+        character = str(item.get("character", ""))
+        if character.isspace():
+            if letters:
+                tokens.append((normalize_text("".join(letters)), confidences))
+                letters, confidences = [], []
+        else:
+            letters.append(character)
+            confidences.append(float(item.get("confidence", 0)))
+    if letters:
+        tokens.append((normalize_text("".join(letters)), confidences))
+    return tokens
+
+
+def _uncertain_edge_consensus(entries: list[tuple[dict, dict]]) -> None:
+    readings = defaultdict(int)
+    for _, region in entries:
+        if region["confidence"] >= 0.9 and region["geometry_complete"]:
+            readings[region["raw_text"]] += 1
+    proposals = []
+    digit_values = {token for _, region in entries for token, _ in region["character_tokens"]
+                    if token.isdigit()}
+    edge_readings = defaultdict(set)
+    for _, region in entries:
+        tokens = region["character_tokens"]
+        if len(tokens) >= 2:
+            edge_readings[" ".join(token for token, _ in tokens[1:])].add(tokens[0][0])
+            edge_readings[" ".join(token for token, _ in tokens[:-1])].add(tokens[-1][0])
+    for _, region in entries:
+        tokens = region["character_tokens"]
+        if len(tokens) < 2:
+            continue
+        for index in (0, len(tokens) - 1):
+            token, probabilities = tokens[index]
+            if len(token) > 1 or not probabilities or max(probabilities) >= 0.85:
+                continue
+            if any(character in "$€£¥%" for character in token):
+                continue
+            if token.isdigit() and len(digit_values) >= 2:
+                continue
+            remaining = tokens[1:] if index == 0 else tokens[:-1]
+            if not all(probabilities and min(probabilities) >= 0.90 for _, probabilities in remaining):
+                continue
+            main = " ".join(token for token, _ in remaining)
+            variants = edge_readings[main]
+            graphic_confusion = any(value.isdigit() for value in variants) and any(value.isalpha() for value in variants)
+            if readings[main] >= 2 and graphic_confusion:
+                proposals.append((region, main))
+                break
+    repeated = defaultdict(int)
+    for region, main in proposals:
+        repeated[(region["raw_text"], main)] += 1
+    for region, main in proposals:
+        if repeated[(region["raw_text"], main)] >= 2:
+            region["text"] = main
+            region["uncertain_edge_ignored"] = True
+
+
+def _assign_line_layouts(observations: list[dict], diagonal: float) -> None:
+    """Keep independent fields in stable physical slots despite detector order."""
+    active = {}
+    next_id = 0
+    for observation in observations:
+        time = observation["candidate"]["timestamp"]
+        active = {key: value for key, value in active.items() if time - value["time"] <= 1.0}
+        used = set()
+        for line in observation["lines"]:
+            matches = []
+            for key, previous in active.items():
+                if key in used:
+                    continue
+                cost = _match_cost(line["box"], previous["box"], diagonal)
+                if cost is not None:
+                    matches.append((cost - (0.02 if line["text"] == previous["text"] else 0), key))
+            if matches:
+                layout_id = min(matches)[1]
+            else:
+                unchanged = [key for key, previous in active.items()
+                             if key not in used and previous["text"] == line["text"]]
+                layout_id = unchanged[0] if len(unchanged) == 1 else next_id
+                if len(unchanged) != 1:
+                    next_id += 1
+            used.add(layout_id)
+            line["layout_id"] = layout_id
+            active[layout_id] = {"box": line["box"], "text": line["text"], "time": time}
+        observation["signature"] = tuple(sorted(
+            (line["layout_id"], line["text"], tuple(
+                region["appearance_identity"] for region in line["regions"] if "appearance_identity" in region
+            )) for line in observation["lines"]
+        )) or None
 
 
 def _snapshot_growth(run: dict, neighbor: dict | None, diagonal: float) -> int:
@@ -344,6 +533,10 @@ def assign_text_states(candidates: list[dict], scenes: list[dict], video: dict) 
                 "box": box, "track": track_id, "clipped": _clipped(source, video),
                 "geometry_complete": source.get("complete_geometry", True) is not False,
                 "geometry_measured": "complete_geometry" in source,
+                "appearance": source.get("appearance", {}),
+                "complete_geometry": source.get("complete_geometry", True),
+                "pattern_evidence": text_pattern_evidence(source),
+                "character_tokens": _character_tokens(source),
                 "contrast": source.get("contrast"), "recovered": False,
             }
             regions.append(region)
@@ -354,6 +547,9 @@ def assign_text_states(candidates: list[dict], scenes: list[dict], video: dict) 
     for observation in observations:
         for region in observation["regions"]:
             history[region["track"]].append((observation, region))
+    for entries in history.values():
+        _appearance_consensus(entries)
+        _uncertain_edge_consensus(entries)
 
     # Repair only weak isolated alphabetic OCR flicker between agreeing readings.
     # Confident alternatives, price changes and consecutive alternatives stay
@@ -391,6 +587,17 @@ def assign_text_states(candidates: list[dict], scenes: list[dict], video: dict) 
     area = max(1, video.get("width", 960) * video.get("height", 540))
     for track in reliable_tracks:
         entries = history[track]
+        pattern_flags = sum(region["pattern_evidence"].get("unlikely_repeated_glyphs", False) for _, region in entries)
+        nonpattern_readings = [
+            region for _, region in entries
+            if region["text"] and region["confidence"] >= MIN_CONFIDENCE
+            and not region["pattern_evidence"].get("unlikely_repeated_glyphs", False)
+            and (not region["pattern_evidence"].get("available")
+                 or region["pattern_evidence"].get("periodicity", 1) >= 0.35)
+        ]
+        if pattern_flags >= 2 and not nonpattern_readings:
+            ignored_auxiliary.add(track)
+            continue
         sizes = [region["box"][2] * region["box"][3] / area for _, region in entries]
         readings = {region["text"] for _, region in entries if region["text"]}
         numeric = {text for text in readings if text.isdigit()}
@@ -463,6 +670,7 @@ def assign_text_states(candidates: list[dict], scenes: list[dict], video: dict) 
     for observation in observations:
         observation["contents"] = list(dict.fromkeys(line["text"] for line in observation["lines"]))
         observation["signature"] = tuple(observation["contents"]) or None
+    _assign_line_layouts(observations, diagonal)
 
     runs = []
     for observation_index, observation in enumerate(observations):
@@ -583,10 +791,15 @@ def assign_text_states(candidates: list[dict], scenes: list[dict], video: dict) 
             run_for_observation[id(item)] = run
         if not brief_fragment and supported:
             previous = accepted[-1] if accepted else None
+            appearance_classes = tuple(sorted(
+                region["appearance_identity"] for region in items[0]["regions"]
+                if "appearance_identity" in region
+            ))
             bridge = (
                 previous is not None and previous["text"] == items[0]["contents"]
                 and first["timestamp"] - previous["end"] <= 0.4
                 and previous["_scene"] == run["scene"]
+                and previous["_appearance"] == appearance_classes
             )
             if bridge:
                 run["state_id"] = previous["id"]
@@ -599,6 +812,7 @@ def assign_text_states(candidates: list[dict], scenes: list[dict], video: dict) 
                     "candidate_ids": [item["candidate"]["id"] for item in items],
                     "start": first["timestamp"], "end": last["timestamp"] + _frame_duration(last, video),
                     "_scene": run["scene"],
+                    "_appearance": appearance_classes,
                 })
 
     for observation in observations:
@@ -668,6 +882,11 @@ def assign_text_states(candidates: list[dict], scenes: list[dict], video: dict) 
         candidate["text_reason"] = reason
         if observation["ignored_weak"]:
             candidate["text_reason"] += "; unreliable regions were not certified"
+        if any(region.get("appearance_consensus") for region in regions):
+            candidate["text_reason"] += "; OCR variants aligned by unchanged native glyph pixels"
+        if any(region.get("uncertain_edge_ignored") for region in regions):
+            candidate["text_reason"] += "; uncertain isolated graphic token was not certified as wording"
     for state in accepted:
         state.pop("_scene", None)
+        state.pop("_appearance", None)
     return accepted

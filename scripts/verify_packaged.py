@@ -225,7 +225,7 @@ def main() -> int:
             cwd = Path(directory)
             fixture = cwd / "synthetic.mkv"
             run([str(ffmpeg), "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
-                 "testsrc2=size=160x90:rate=12:duration=3", "-c:v", "ffv1", str(fixture)], cwd, env)
+                 "smptebars=size=160x90:rate=12:duration=3", "-c:v", "ffv1", str(fixture)], cwd, env)
             original = digest(fixture)
             version = run([str(cli), "--version"], cwd, env).stdout.strip()
             extraction = run([str(cli), "extract", str(fixture), "--json", "--output", str(cwd / "output"), "--report"], cwd, env)

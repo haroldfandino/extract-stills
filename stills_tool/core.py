@@ -638,7 +638,7 @@ def _deduplicate(candidates, source, video, directory, end_id, progress, cancel)
     hashes = _native_hashes(source, video, [c["id"] for c in candidates], directory, cancel)
     exact, representatives, cache = {}, [], OrderedDict()
     phasher = cv2.img_hash.PHash_create()
-    order = sorted(candidates, key=lambda c: (c["id"] == end_id, c["score"]), reverse=True)
+    order = sorted(candidates, key=lambda c: (c["id"] == end_id, *_candidate_rank(c)), reverse=True)
 
     def full_frame(index):
         if index not in cache:
@@ -687,6 +687,12 @@ def _deduplicate(candidates, source, video, directory, end_id, progress, cancel)
         _progress(progress, "Removing duplicates", number + 1, len(order))
 
 
+def _candidate_rank(candidate):
+    # Display scores are rounded to two decimals. Preserve finer native focus
+    # evidence when two candidates otherwise receive the same quality score.
+    return candidate["score"], candidate.get("metrics", {}).get("focus_quality", 0) or 0
+
+
 def select_candidates(candidates, scenes, base_target, count=None, end_id=None):
     pool = [c for c in candidates if c["eligible"] and c.get("text_ready", True)
             and c["duplicate_of"] is None]
@@ -696,7 +702,7 @@ def select_candidates(candidates, scenes, base_target, count=None, end_id=None):
     for scene in scenes:
         group = [c for c in pool if c["scene_id"] == scene["id"]]
         if group:
-            representatives.append(max(group, key=lambda c: c["score"]))
+            representatives.append(max(group, key=_candidate_rank))
     target = count if count is not None else max(base_target, len(representatives))
     selected = []
     if end_id is not None and any(c["id"] == end_id for c in pool):
@@ -715,7 +721,7 @@ def select_candidates(candidates, scenes, base_target, count=None, end_id=None):
         selected_times = [c["timestamp"] for c in pool if c["id"] in selected]
         def utility(candidate):
             distance = min((abs(candidate["timestamp"] - t) for t in selected_times), default=1)
-            return candidate["score"] + 35 * min(distance, 2)
+            return candidate["score"] + 35 * min(distance, 2), _candidate_rank(candidate)[1]
         selected.append(max(remaining, key=utility)["id"])
     selected.sort()
     if end_id in selected:
@@ -749,7 +755,7 @@ def _select_word_coverage(pool, base_target, count, end_id, all_candidates=None)
             gained = covers[c["id"]] - covered
             # Preserve actual text changes even when one continuous shot has
             # several captions; a persistent logo cannot exhaust its scene.
-            return (sum(2 if kind == "text" else 1 for kind, _ in gained), c["score"])
+            return (sum(2 if kind == "text" else 1 for kind, _ in gained), *_candidate_rank(c))
         best = max(available, key=utility)
         selected.append(best["id"])
         covered.update(covers[best["id"]])
@@ -761,7 +767,7 @@ def _select_word_coverage(pool, base_target, count, end_id, all_candidates=None)
         selected_times = [by_id[i]["timestamp"] for i in selected]
         def utility(c):
             distance = min((abs(c["timestamp"] - t) for t in selected_times), default=1)
-            return c["score"] + 35 * min(distance, 2)
+            return c["score"] + 35 * min(distance, 2), _candidate_rank(c)[1]
         selected.append(max(available, key=utility)["id"])
     selected.sort()
     if end_id in selected:
@@ -814,6 +820,7 @@ def analyze_video(path, options=None, progress=None, cancel=None):
         warnings.append("Missing color metadata: untagged components were assumed Rec.709 SDR.")
     try:
         from .vision import LocalVision
+        from .text_appearance import clear_text_appearance_cache, release_text_appearance
         vision = LocalVision()
         try:
             indexes, records, scenes, size = _decode_scan(source, video, directory, progress, cancel)
@@ -831,15 +838,15 @@ def analyze_video(path, options=None, progress=None, cancel=None):
             for scene in scenes:
                 group = [c for c in candidates if c["scene_id"] == scene["id"] and c["eligible"]]
                 if group:
-                    best = max(group, key=lambda c: c["score"])
+                    best = max(group, key=_candidate_rank)
                     anchors.append(best)
                     distant = [c for c in group if abs(c["timestamp"] - best["timestamp"]) >= 0.6]
                     if distant:
-                        anchors.append(max(distant, key=lambda c: c["score"]))
+                        anchors.append(max(distant, key=_candidate_rank))
             for state in text_states:
                 group = [c for c in candidates if c.get("text_state_id") == state["id"]]
                 if group:
-                    anchors.append(max(group, key=lambda c: (c["text_ready"], c["score"])))
+                    anchors.append(max(group, key=lambda c: (c["text_ready"], *_candidate_rank(c))))
             # Unsupported brief readings need a second native observation.
             anchors += [c for c in candidates if c.get("text_contents") and c.get("text_state_id") is None]
             for candidate in anchors:
@@ -859,6 +866,7 @@ def analyze_video(path, options=None, progress=None, cancel=None):
             _score_candidates(candidates, scenes, analysis_video)
         finally:
             vision.close()
+            clear_text_appearance_cache()
         end_id = None
         for scene in reversed(scenes):
             group = [c for c in candidates if c["scene_id"] == scene["id"] and c["eligible"]]
@@ -870,7 +878,7 @@ def analyze_video(path, options=None, progress=None, cancel=None):
                 if terminal_state is not None:
                     group = [c for c in group if c.get("text_state_id") == terminal_state]
                 settled = [c for c in group if c["metrics"]["text_stability"] >= 0.8]
-                end_id = max(settled or group, key=lambda c: c["score"])["id"]
+                end_id = max(settled or group, key=_candidate_rank)["id"]
                 break
         if end_id is None:
             warnings.append("No suitable stable ending frame was found.")
@@ -878,6 +886,10 @@ def analyze_video(path, options=None, progress=None, cancel=None):
         base = duration_target(video["duration"], video["fps"])
         selected, target = select_candidates(candidates, scenes, base, options.count, end_id)
         _record_text_coverage(candidates, text_states, selected)
+        # Native lossless patches are transient temporal evidence. Export and
+        # review use the recorded wording decisions and original source frames;
+        # retain compact diagnostics without bloating saved analyses with pixels.
+        release_text_appearance(candidates)
         missed_states = [s["id"] for s in text_states if s["selected_frame_id"] is None and
                          any(c.get("text_state_id") == s["id"] and c["eligible"] for c in candidates)]
         if missed_states:

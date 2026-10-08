@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from stills_tool.text_states import assign_text_states, normalize_text
+from stills_tool.text_appearance import attach_text_appearance
 
 
 def region(text, confidence=0.97, *, box=None, clipped=False, contrast=0.90):
@@ -388,6 +389,92 @@ def test_camera_scene_cut_does_not_turn_unchanged_complete_words_into_fragment()
     ]
     states = assign_text_states(candidates, scenes, {"width": 960, "height": 540, "fps": 24})
     assert len(states) == 1
+    assert all(item["text_ready"] for item in candidates)
+
+
+def test_independent_fields_keep_identity_when_detector_y_sort_changes():
+    candidates = []
+    for index in range(4):
+        first_y, second_y = (100, 103) if index < 2 else (105, 99)
+        candidates.append(candidate(index, index * 0.1, [
+            region("JUNE", box=[100, first_y, 90, 30]),
+            region("MORNING", box=[450, second_y, 150, 30]),
+        ]))
+    states = assign(candidates)
+    assert len(states) == 1
+    assert all(item["text_ready"] for item in candidates)
+    assert {tuple(item["text_contents"]) for item in candidates} == {("june", "morning"), ("morning", "june")}
+
+
+def test_actual_field_value_change_is_preserved_during_y_sort_jitter():
+    candidates = []
+    for index in range(4):
+        first_y, second_y = (100, 103) if index < 2 else (105, 99)
+        candidates.append(candidate(index, index * 0.1, [
+            region("JUNE" if index < 2 else "JULY", box=[100, first_y, 90, 30]),
+            region("MORNING", box=[450, second_y, 150, 30]),
+        ]))
+    states = assign(candidates)
+    assert len(states) == 2
+    assert {"june", "morning"} == set(states[0]["text"])
+    assert {"july", "morning"} == set(states[1]["text"])
+
+
+def _native_reading(actual: str, observed: str) -> dict:
+    image = np.full((180, 640, 3), 220, np.uint8)
+    cv2.putText(image, actual, (120, 95), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (15, 15, 15), 3, cv2.LINE_AA)
+    source = region(observed, box=[100, 45, 420, 80])
+    source["complete_geometry"] = True
+    return attach_text_appearance(image, [source])[0]
+
+
+@pytest.mark.parametrize("first,alternative", [("C15:0", "C15:O"), ("C15:O", "C15:0"), ("$25", "$75")])
+def test_native_alias_class_cannot_hide_a_later_real_glyph_change(first, alternative):
+    values = [(first, alternative), (first, first), (alternative, alternative), (alternative, alternative)]
+    candidates = [candidate(index, index * 0.1, [_native_reading(actual, observed)])
+                  for index, (actual, observed) in enumerate(values)]
+    states = assign(candidates)
+    assert len(states) == 2
+    assert [item["text_state_id"] for item in candidates] == [0, 0, 1, 1]
+    assert all(item["text_ready"] for item in candidates)
+    assert candidates[0]["vision"]["text"][0]["text"] == alternative
+
+
+def _characters(text, digit_confidence=0.99):
+    return [{"character": value, "confidence": digit_confidence if value.isdigit() else 0.99,
+             "column_start": index / max(1, len(text)), "column_end": (index + 1) / max(1, len(text))}
+            for index, value in enumerate(text)]
+
+
+@pytest.mark.parametrize("values", [
+    ["tips", "tips", "2 tips", "2 tips", "3 tips", "3 tips"],
+    ["tips", "tips", "25 tips", "25 tips", "75 tips", "75 tips"],
+])
+def test_repeated_numeric_prefixes_are_not_erased_by_character_confidence(values):
+    candidates = [
+        candidate(index, index * 0.1, [dict(
+            region(text), recognition_characters=_characters(text, digit_confidence=0.84),
+            recognition_details_match=True,
+        )]) for index, text in enumerate(values)
+    ]
+    states = assign(candidates)
+    assert len(states) == 3
+    assert all(item["text_ready"] for item in candidates)
+    assert candidates[2]["text_contents"] == [values[2]]
+    assert candidates[4]["text_contents"] == [values[4]]
+
+
+def test_contained_duplicate_ocr_does_not_duplicate_a_visible_line():
+    image = np.full((180, 640, 3), 220, np.uint8)
+    cv2.putText(image, "SEP 12 2026", (110, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (15, 15, 15), 3, cv2.LINE_AA)
+    regions = attach_text_appearance(image, [
+        dict(region("SEP 12 2026", box=[100, 45, 380, 80]), complete_geometry=True),
+        dict(region("SEP", box=[100, 45, 120, 80]), complete_geometry=True),
+    ])
+    candidates = [candidate(index, index * 0.1, copy.deepcopy(regions)) for index in range(3)]
+    states = assign(candidates)
+    assert len(states) == 1
+    assert states[0]["text"] == ["sep 12 2026"]
     assert all(item["text_ready"] for item in candidates)
 
 

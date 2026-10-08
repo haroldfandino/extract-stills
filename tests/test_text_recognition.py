@@ -10,7 +10,9 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import pytest
 
-from stills_tool.text_ocr import TextRecognizer, decode_ctc, load_characters, rectify_region, region_is_clipped
+from stills_tool.text_ocr import (
+    TextRecognizer, decode_ctc, decode_ctc_details, load_characters, rectify_region, region_is_clipped,
+)
 from stills_tool.vision import LocalVision, MissingModelsError
 
 
@@ -71,6 +73,40 @@ def test_ctc_retains_repeated_letters_spaces_and_accented_words():
     probability[:] = 0
     probability[:, :, 0] = 1
     assert decode_ctc(probability, characters) == ("", 0)
+
+
+def test_ctc_character_details_expose_weak_prefix_without_an_extra_model_pass():
+    characters = [""] + list("2 mixbok")
+    indexes = [0]
+    for character in "2 mixbook":
+        indexes.extend([characters.index(character), characters.index(character), 0])
+    prediction = np.zeros((1, len(indexes), len(characters)), np.float32)
+    for position, index in enumerate(indexes):
+        prediction[0, position, index] = .60 if index == characters.index("2") else .999
+    calls = []
+    recognizer = TextRecognizer.__new__(TextRecognizer)
+    recognizer.characters = characters
+    recognizer.input_name = "x"
+    recognizer.session = type("Session", (), {"run": lambda self, *args: calls.append(args) or [prediction]})()
+    details = recognizer._oriented_details(np.zeros((48, 320, 3), np.uint8))
+    assert len(calls) == 1
+    assert details["text"] == "2 mixbook" and details["recognition_confidence"] > .95
+    assert details["recognition_characters"][0]["character"] == "2"
+    assert details["recognition_min_char_confidence"] == pytest.approx(.60)
+    assert all(0 <= item["column_start"] < item["column_end"] <= 1 for item in details["recognition_characters"])
+    assert decode_ctc(prediction, characters) == (details["text"], details["recognition_confidence"])
+
+
+def test_ctc_detail_text_alignment_trims_only_leading_and_trailing_spaces():
+    characters = ["", " ", "a", "b"]
+    indexes = [1, 0, 2, 0, 1, 0, 3, 0, 1]
+    prediction = np.zeros((1, len(indexes), len(characters)), np.float32)
+    for position, index in enumerate(indexes):
+        prediction[0, position, index] = 1
+    details = decode_ctc_details(prediction, characters)
+    assert details["text"] == "a b"
+    assert "".join(item["character"] for item in details["recognition_characters"]) == "a b"
+    assert details["recognition_characters"][0]["column_start"] > 0
 
 
 @pytest.mark.parametrize("prediction", [np.zeros((1, 4, 9)), np.full((1, 4, 2), np.nan),
@@ -341,6 +377,36 @@ def test_native_redetection_recovers_whole_words_from_incomplete_source_boxes(re
     result = sorted(recognizer.recognize_text(frame, refined), key=lambda item: item["box"][0])
     assert " ".join(item["text"] for item in result) == "COMPLETE WORDS"
     assert all(item["refined_native"] and item["complete_geometry"] for item in result)
+
+
+def test_cached_native_color_crop_adds_character_details_without_video_or_face_inference(recognizer, monkeypatch):
+    frame = _title()
+    originals = recognizer.recognize_text(frame)
+    normalized = []
+    for original in originals:
+        item = dict(original, box=[value/2 for value in original["box"]])
+        for key in ("polygon", "raw_polygon", "recognition_polygon"):
+            if key in original:
+                item[key] = [[x/2, y/2] for x, y in original[key]]
+        for key in ("recognition_characters", "recognition_min_char_confidence", "recognition_rotation"):
+            item.pop(key, None)
+        normalized.append(item)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Character cache replay reran frame/face/text detection")
+
+    monkeypatch.setattr(recognizer, "_text", forbidden)
+    monkeypatch.setattr(recognizer, "_faces", forbidden)
+    enriched = recognizer.enrich_recognition_from_appearance(normalized, coordinate_scale=(2, 2))
+    assert enriched[0]["text"] == normalized[0]["text"] == "BEST STILLS ARE READY"
+    assert enriched[0]["recognition_details_match"]
+    assert "".join(item["character"] for item in enriched[0]["recognition_characters"]) == enriched[0]["text"]
+    assert enriched[0]["box"] == normalized[0]["box"]
+    changed = dict(normalized[0], text="DIFFERENT CACHED TEXT")
+    mismatch = recognizer.enrich_recognition_from_appearance([changed], coordinate_scale=(2, 2))[0]
+    assert mismatch["text"] == "DIFFERENT CACHED TEXT" and not mismatch["recognition_details_match"]
+    assert mismatch["recognition_detail_text"] == "BEST STILLS ARE READY"
+    assert "recognition_characters" not in mismatch
 
 
 @pytest.mark.parametrize("frame_index", [108, 114])

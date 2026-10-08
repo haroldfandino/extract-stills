@@ -118,7 +118,9 @@ def collect_notices(directory: Path, ffmpeg: dict[str, Path], manifest: dict, so
         name = distribution.metadata.get("Name", "unknown")
         versions[name] = distribution.version
         for item in distribution.files or []:
-            if not item.name.upper().startswith(("LICENSE", "COPYING", "NOTICE")):
+            license_name = any(marker in item.name.upper() for marker in ("LICENSE", "LICENCE", "COPYING", "NOTICE"))
+            license_folder = any(part.casefold() in ("license", "licenses", "licence", "licences", "notices") for part in item.parts[:-1])
+            if not (license_name or license_folder):
                 continue
             path = distribution.locate_file(item)
             if path.is_file():

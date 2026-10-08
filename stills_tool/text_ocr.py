@@ -56,6 +56,17 @@ def load_characters(config_path: Path) -> list[str]:
 
 def decode_ctc(prediction: np.ndarray, characters: list[str]) -> tuple[str, float]:
     """Greedy CTC decoding; repeated letters separated by blank are retained."""
+    details = decode_ctc_details(prediction, characters)
+    return details["text"], details["recognition_confidence"]
+
+
+def decode_ctc_details(prediction: np.ndarray, characters: list[str]) -> dict:
+    """Decode the same CTC output with character probabilities and column spans.
+
+    Spans describe approximate model columns, not detected character boxes or
+    proof of complete glyphs. Confidence uses the first emitted column, matching
+    the established greedy decoder and its aggregate confidence contract.
+    """
     scores = np.asarray(prediction)
     if scores.ndim != 3 or scores.shape[0] != 1 or scores.shape[2] != len(characters):
         raise RuntimeError("Text recognizer returned an incompatible CTC output")
@@ -71,7 +82,22 @@ def decode_ctc(prediction: np.ndarray, characters: list[str]) -> tuple[str, floa
     keep &= indexes != 0
     text = "".join(characters[int(index)] for index in indexes[keep]).strip()
     confidence = float(np.mean(probabilities[keep])) if text else 0.0
-    return text, float(np.clip(confidence, 0, 1))
+    positions = np.flatnonzero(keep)
+    decoded = []
+    for position in positions:
+        end = int(position)+1
+        while end < len(indexes) and indexes[end] == indexes[position]:
+            end += 1
+        decoded.append({"character": characters[int(indexes[position])],
+                        "confidence": float(np.clip(probabilities[position], 0, 1)),
+                        "column_start": float(position / len(indexes)),
+                        "column_end": float(end / len(indexes))})
+    while decoded and decoded[0]["character"].isspace():
+        decoded.pop(0)
+    while decoded and decoded[-1]["character"].isspace():
+        decoded.pop()
+    return {"text": text, "recognition_confidence": float(np.clip(confidence, 0, 1)),
+            "recognition_characters": decoded}
 
 
 def _polygon(region: dict[str, Any]) -> np.ndarray:
@@ -158,19 +184,38 @@ class TextRecognizer:
         return tensor
 
     def _line(self, crop: np.ndarray) -> tuple[str, float]:
+        details = self._line_details(crop)
+        return details["text"], details["recognition_confidence"]
+
+    def _line_details(self, crop: np.ndarray) -> dict:
         tensor = self.prepare(crop)
         prediction = self.session.run(None, {self.input_name: tensor})[0]
-        return decode_ctc(prediction, self.characters)
+        details = decode_ctc_details(prediction, self.characters)
+        resized_width = min(tensor.shape[3], max(1, math.ceil(48 * crop.shape[1] / crop.shape[0])))
+        column_scale = tensor.shape[3] / resized_width
+        for character in details["recognition_characters"]:
+            character["column_start"] = float(np.clip(character["column_start"] * column_scale, 0, 1))
+            character["column_end"] = float(np.clip(character["column_end"] * column_scale, 0, 1))
+        details["recognition_rotation"] = 0
+        details["recognition_min_char_confidence"] = min(
+            (character["confidence"] for character in details["recognition_characters"]
+             if not character["character"].isspace()), default=0.0)
+        return details
 
     def _oriented_line(self, crop: np.ndarray) -> tuple[str, float]:
-        text, confidence = self._line(crop)
+        details = self._oriented_details(crop)
+        return details["text"], details["recognition_confidence"]
+
+    def _oriented_details(self, crop: np.ndarray) -> dict:
+        details = self._line_details(crop)
         # No extra orientation model is needed for occasional upside-down
         # titles. Keep the ordinary reading when confidence is already high.
-        if confidence < 0.85:
-            rotated_text, rotated_confidence = self._line(cv2.rotate(crop, cv2.ROTATE_180))
-            if rotated_confidence > confidence + 0.10:
-                text, confidence = rotated_text, rotated_confidence
-        return text, confidence
+        if details["recognition_confidence"] < 0.85:
+            rotated = self._line_details(cv2.rotate(crop, cv2.ROTATE_180))
+            if rotated["recognition_confidence"] > details["recognition_confidence"] + 0.10:
+                details = rotated
+                details["recognition_rotation"] = 180
+        return details
 
     def recognize(self, frame: np.ndarray, regions: list[dict[str, Any]]) -> list[dict[str, Any]]:
         result = []
@@ -178,7 +223,8 @@ class TextRecognizer:
             item = dict(region)
             item["clipped"] = region_is_clipped(region, frame.shape)
             crop = rectify_region(frame, region)
-            text, confidence = self._oriented_line(crop)
+            details = self._oriented_details(crop)
+            text, confidence = details["text"], details["recognition_confidence"]
             # DB can shrink a superscript/short-number crop inside the glyphs.
             # Limited native-pixel context repairs incomplete local crops such
             # as a visible "15" initially read as "a". Large words never expand
@@ -189,12 +235,62 @@ class TextRecognizer:
                 center, (width, height), angle = cv2.minAreaRect(_polygon(region))
                 context_polygon = cv2.boxPoints((center, (width+2*margin, height+2*margin), angle))
                 context_crop = rectify_region(frame, {"polygon": context_polygon})
-                context_text, context_confidence = self._oriented_line(context_crop)
+                context_details = self._oriented_details(context_crop)
+                context_text, context_confidence = context_details["text"], context_details["recognition_confidence"]
                 extension = (bool(text) and text in context_text and len(context_text) > len(text)
                              and context_confidence >= confidence - .01)
                 if context_confidence >= .90 and (context_confidence > confidence + .05 or extension):
                     text, confidence = context_text, context_confidence
+                    details = context_details
                     item["recognition_polygon"] = context_polygon.tolist()
-            item.update(text=text, recognition_confidence=confidence)
+            item.update(details)
+            result.append(item)
+        return result
+
+    def enrich_from_appearance(self, regions: list[dict], coordinate_scale: tuple[float, float] = (1, 1)) -> list[dict]:
+        """Add character details from cached version-2 native patches.
+
+        No video decoding, text detection or face inference is performed. Input
+        geometry may be analysis-sized; supply its native x/y scale. Cached text
+        is preserved. A different replay reading gets separate detail fields and
+        a False alignment flag, preventing probabilities from attaching to the
+        wrong historical characters.
+        """
+        from .text_appearance import decode_text_appearance
+
+        sx, sy = coordinate_scale
+        if not all(math.isfinite(value) and value > 0 for value in (sx, sy)):
+            raise ValueError("Recognition cache coordinate scales must be finite and positive")
+        result = []
+        for source in regions:
+            item = dict(source)
+            decoded = decode_text_appearance(source)
+            if decoded is None:
+                item["recognition_details_match"] = False
+                item["recognition_detail_reason"] = "Verified native color appearance is unavailable."
+                result.append(item)
+                continue
+            capsule, pixels = decoded
+            x0, y0 = capsule["bounds"][:2]
+            native = dict(source)
+            if "recognition_polygon" in capsule:
+                native["recognition_polygon"] = [[x-x0, y-y0] for x, y in capsule["recognition_polygon"]]
+            else:
+                for key in ("polygon", "raw_polygon", "recognition_polygon"):
+                    if key in source:
+                        native[key] = [[x*sx-x0, y*sy-y0] for x, y in source[key]]
+                x, y, w, h = source["box"]
+                native["box"] = [x*sx-x0, y*sy-y0, w*sx, h*sy]
+            details = self._oriented_details(rectify_region(pixels, native))
+            matching = details["text"] == str(source.get("text", ""))
+            item["recognition_details_match"] = matching
+            if matching:
+                for key in ("recognition_characters", "recognition_min_char_confidence", "recognition_rotation"):
+                    item[key] = details[key]
+            else:
+                item["recognition_detail_text"] = details["text"]
+                item["recognition_detail_characters"] = details["recognition_characters"]
+                item["recognition_detail_confidence"] = details["recognition_confidence"]
+                item["recognition_detail_reason"] = "Native crop replay differs; character details apply only to the replay text."
             result.append(item)
         return result

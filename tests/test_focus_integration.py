@@ -53,6 +53,16 @@ def test_two_high_focus_candidates_do_not_tie_from_percentile_saturation():
     assert selected == [11]
 
 
+@pytest.mark.parametrize("state", [None, 0])
+def test_rounded_display_scores_keep_finer_native_focus_for_selection(state):
+    candidates = [candidate(10, {"scene": 18.000, "face": None, "text": None, "noise": 0}, state=state),
+                  candidate(11, {"scene": 18.001, "face": None, "text": None, "noise": 0}, state=state)]
+    score(candidates)
+    assert candidates[0]["score"] == candidates[1]["score"]
+    assert candidates[1]["metrics"]["focus_quality"] > candidates[0]["metrics"]["focus_quality"]
+    assert core.select_candidates(candidates, [SCENE], 1)[0] == [11]
+
+
 def test_sharper_face_wins_with_equally_detailed_backgrounds():
     candidates = [candidate(10, {"scene": 20, "face": 5, "text": None, "noise": 0}, faces=[face()]),
                   candidate(11, {"scene": 20, "face": 17, "text": None, "noise": 0}, faces=[face()])]
