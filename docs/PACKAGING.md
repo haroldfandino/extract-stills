@@ -4,7 +4,7 @@ Build on the target platform with Python 3.12: Windows x64 or Apple Silicon macO
 
 ## Build and verify
 
-Create a virtual environment, install `requirements-dev.txt`, and fetch the models using the documented project setup. Put native `ffmpeg` and `ffprobe` in `ffmpeg/` or `ffmpeg/bin/`; the helper falls back to PATH at build time. Models must match the hashes in `models/manifest.json`. FFmpeg must supply `zscale`, `tonemap`, and `iccgen`; nonfree builds are rejected.
+Create a virtual environment, install `requirements-dev.txt`, and fetch the models using the documented project setup. Put native `ffmpeg` and `ffprobe` in `ffmpeg/` or `ffmpeg/bin/`; the helper falls back to PATH at build time. All four assets must match `models/manifest.json`: face landmarker, text detector, Latin text recognizer, and its exact `.yml` dictionary/configuration. The entire model directory is bundled, including that dictionary; runtime recognition has no download step or YAML package requirement. FFmpeg must supply `zscale`, `tonemap`, and `iccgen`; nonfree builds are rejected.
 
 ```powershell
 .venv\Scripts\python.exe build_app.py --dry-run
@@ -20,7 +20,9 @@ Create a virtual environment, install `requirements-dev.txt`, and fetch the mode
 
 Windows outputs `dist/gui/Extract Stills/Extract Stills.exe` and `dist/cli/extract-stills/extract-stills.exe`. Mac outputs `dist/gui/Extract Stills.app` and `dist/cli/extract-stills/extract-stills`. Distinct directories prevent the console and GUI builds from overwriting one another. `--target cli` or `--target gui` builds one entry point. Icons are taken from `assets/icon.ico` or `assets/icon.icns` when present.
 
-The verifier generates its own small FFV1 test clip, runs the frozen console from a temporary working directory, restricts PATH, checks model hashes and bundled notices, and verifies original resolution, 8-bit PNG, 16-bit RGB TIFF, embedded ICC profiles, and unchanged input. An optional GUI smoke test runs Qt offscreen and checks the frozen desktop's legacy worker. Proxy settings discourage network access; this does not constitute network isolation. Repeat extraction with networking disabled on a clean machine without Python or system FFmpeg before release.
+Use `--dist-dir dist/beta3` to preserve an earlier beta for comparison. Its entry points live under `dist/beta3/gui` and `dist/beta3/cli`. Keep the earlier Beta 2 ZIP and save Beta 3 separately as `release/Extract-Stills-Windows-x64-V2-beta3.zip`. Package collection discovers all `stills_tool` modules, including sharpness, OCR recognition, and temporal text-state tracking, automatically.
+
+The verifier generates its own small FFV1 test clips, runs the frozen console from a temporary working directory, restricts PATH, checks model hashes and bundled notices, and verifies original resolution, 8-bit PNG, 16-bit RGB TIFF, embedded ICC profiles, and unchanged input. A second clip holds `ALPHA`, `BRAVO`, and `CLEAR` for ten frames each against the same background; its frozen analysis must read all three complete captions, record their coverage, grow the duration target from two to three images, and produce native text-region focus evidence. The verifier's host uses the pinned Pillow embedded font to generate pixels, while the frozen application supplies OCR and selection. It needs neither system fonts nor FFmpeg's optional `drawtext` filter. An optional GUI smoke test runs Qt offscreen and checks the frozen desktop's legacy worker. Proxy settings discourage network access; this does not constitute network isolation. Repeat extraction with networking disabled on a clean machine without Python or system FFmpeg before release.
 
 ## macOS support and signing
 

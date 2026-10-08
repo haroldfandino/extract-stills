@@ -10,9 +10,13 @@ Windows: open **Extract Stills.exe** in the complete GUI distribution folder. ma
 
 Drop video files or folders, choose Smart or Legacy, and run. Smart defaults to original-resolution 8-bit PNG in sRGB. Folder scans are nonrecursive unless enabled. Each source gets a separate run folder beside it under stills, or under the chosen output root.
 
-Enable **Review before export** to choose scored candidates yourself. Thumbnails are grouped by scene; click a preview for a larger view. Low/Mid/High scores describe local sharpness, text stability, exposure and facial-expression signals. Reports are optional.
+Enable **Review before export** to choose scored candidates yourself. Thumbnails are grouped by scene; click a preview for a larger view. Low/Mid/High scores describe local sharpness, text stability, exposure and facial-expression signals. Recognized wording and Words ready/incomplete cues help review animated or cropped text. Reports are optional.
 
-Smart favors open eyes with a small smile bonus, settled titles and scene coverage. It targets 6/10/15/20 stills for 6/15/30/over-30-second videos, interpolates between anchors, and increases the automatic count for distinct scenes. Quality shortfalls produce fewer stills and an explanation. Count override is a maximum.
+Smart favors open eyes with a small smile bonus, settled titles and scene coverage. It targets 6/10/15/20 stills for 6/15/30/over-30-second videos, interpolates between anchors, and increases the automatic count for distinct scenes and complete readable wording occurrences. Automatic counts remain the default. Quality shortfalls produce fewer stills and an explanation. Count override is a maximum; reports explain any wording occurrences excluded by that cap.
+
+Focus ranking combines multiple native-pixel scales, noise correction and edge acutance. It checks original-resolution face/text regions and scene tiles, then searches wider native-frame neighborhoods around promising moments. Continuous rankings distinguish sharp candidates that previously received the same score; distant weaker frames cannot pad a run solely for temporal variety.
+
+Local Latin-script OCR identifies changed words even inside a continuous shot. Native regional detection repairs fragmented word crops and long fine print; temporal consensus waits for complete, unclipped, readable wording instead of brief typing/scroll fragments. The same wording can recur later, while a repeated identical image is exported once and linked to both occurrences. OCR confidence and completeness are evidence-based estimates, not guarantees of spelling or original opacity.
 
 The ending selection is a stable frame near the end of the last usable shot. Text stability is an estimate from video pixels, not a measurement of original text opacity. Detection is heuristic; serious expressions and unreliable or tiny faces are treated appropriately rather than requiring a smile.
 
@@ -59,7 +63,7 @@ JSON stdout contains version, status, results and errors; diagnostics/progress g
 - Output pixels come directly from the source, never from JPEG analysis previews. Converting an 8-bit source into a 16-bit file does not restore missing source precision.
 - Missing color tags are assumed Rec.709 SDR and reported.
 - Manifest includes frame IDs, timestamps, scores, source/output color and actual selection count.
-- Optional scores.html, scores.json and scores.csv include all scored candidates, reasons and duplicate decisions. Keep previews with the HTML report.
+- Optional scores.html, scores.json and scores.csv include all scored candidates, native focus evidence, recognized wording, text readiness, occurrence coverage, reasons and duplicate decisions. Keep previews with the HTML report.
 
 ## Legacy compatibility
 

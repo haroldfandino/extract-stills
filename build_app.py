@@ -59,6 +59,9 @@ def validate_models() -> dict:
         entries = list(entries.values())
     if not entries:
         raise ValueError("The model manifest has no models.")
+    required = {"face_landmarker", "text_detector", "text_recognizer", "text_dictionary"}
+    if not required.issubset({entry.get("id") for entry in entries}):
+        raise ValueError("The model manifest must include face detection, text detection, Latin recognition, and its exact dictionary.")
     for entry in entries:
         filename = entry.get("filename") or entry.get("file") or entry.get("path")
         if not filename:
@@ -70,6 +73,8 @@ def validate_models() -> dict:
         actual = hashlib.sha256(candidate.read_bytes()).hexdigest()
         if not expected or actual != expected.lower():
             raise ValueError(f"Model checksum does not match manifest: {filename}")
+        if candidate.stat().st_size != entry.get("size_bytes"):
+            raise ValueError(f"Model size does not match manifest: {filename}")
     return manifest
 
 

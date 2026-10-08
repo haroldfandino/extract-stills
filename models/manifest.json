@@ -52,7 +52,63 @@
         "max_candidates": 1000,
         "unclip_ratio": 1.5
       },
-      "notes": "Detection only; no OCR language recognition, document unwarping or cloud APIs. DB quadrilateral expansion uses the rectangle's area/perimeter offset without additional polygon libraries."
+      "notes": "Detection followed by the separately pinned Latin recognizer when text content is needed. DB quadrilateral expansion uses the rectangle's area/perimeter offset without additional polygon libraries. Raw detector geometry is retained to identify clipped text."
+    },
+    {
+      "id": "text_recognizer",
+      "name": "PP-OCRv5 Latin mobile text recognizer",
+      "version": "latin_PP-OCRv5_mobile_rec_onnx",
+      "revision": "89d3a50e2c27e2e7cceeab0e944c25c807d5db4f",
+      "filename": "pp_ocrv5_latin_rec.onnx",
+      "url": "https://huggingface.co/PaddlePaddle/latin_PP-OCRv5_mobile_rec_onnx/resolve/89d3a50e2c27e2e7cceeab0e944c25c807d5db4f/inference.onnx",
+      "size_bytes": 8042023,
+      "sha256": "7888113072263cb471b93f66dd5e2ad70548dc526fa1ace760d0d973dd121498",
+      "license": "Apache-2.0",
+      "source": "https://huggingface.co/PaddlePaddle/latin_PP-OCRv5_mobile_rec_onnx",
+      "license_sources": [
+        "https://huggingface.co/PaddlePaddle/latin_PP-OCRv5_mobile_rec_onnx/blob/89d3a50e2c27e2e7cceeab0e944c25c807d5db4f/README.md",
+        "https://github.com/PaddlePaddle/PaddleOCR/blob/main/LICENSE"
+      ],
+      "configuration_source": "https://huggingface.co/PaddlePaddle/latin_PP-OCRv5_mobile_rec_onnx/blob/89d3a50e2c27e2e7cceeab0e944c25c807d5db4f/inference.yml",
+      "runtime": "onnxruntime==1.23.2; CPUExecutionProvider",
+      "conversion": "None. This is PaddlePaddle's official, preconverted ONNX artifact.",
+      "preprocessing": {
+        "image_order": "BGR",
+        "height": 48,
+        "minimum_width": 320,
+        "maximum_width": 3200,
+        "preserve_aspect_ratio": true,
+        "scale": 0.00392156862745098,
+        "mean": [0.5, 0.5, 0.5],
+        "std": [0.5, 0.5, 0.5],
+        "normalized_padding": 0
+      },
+      "postprocessing": {
+        "decoder": "CTCLabelDecode",
+        "blank_index": 0,
+        "append_space_character": true,
+        "dictionary_characters": 836,
+        "output_classes": 838,
+        "confidence": "Mean probability of emitted, nonblank CTC characters; not a calibrated legibility probability."
+      },
+      "notes": "Latin-script recognition includes English and accented Spanish. Perspective-rectified native image crops, dynamic width, no cloud services. Tall lines are rotated; low-confidence lines also try 180 degrees. Geometry and temporal consensus are required to determine settled, complete text."
+    },
+    {
+      "id": "text_dictionary",
+      "name": "PP-OCRv5 Latin recognition configuration and character dictionary",
+      "version": "latin_PP-OCRv5_mobile_rec_onnx/inference.yml",
+      "revision": "89d3a50e2c27e2e7cceeab0e944c25c807d5db4f",
+      "filename": "pp_ocrv5_latin_rec.yml",
+      "url": "https://huggingface.co/PaddlePaddle/latin_PP-OCRv5_mobile_rec_onnx/resolve/89d3a50e2c27e2e7cceeab0e944c25c807d5db4f/inference.yml",
+      "size_bytes": 6817,
+      "sha256": "0bbe984570f597af3638e50bdf2e8276f3ab26a61966096538b3b0d1849f5c84",
+      "license": "Apache-2.0",
+      "source": "https://huggingface.co/PaddlePaddle/latin_PP-OCRv5_mobile_rec_onnx/blob/89d3a50e2c27e2e7cceeab0e944c25c807d5db4f/inference.yml",
+      "license_sources": [
+        "https://huggingface.co/PaddlePaddle/latin_PP-OCRv5_mobile_rec_onnx/blob/89d3a50e2c27e2e7cceeab0e944c25c807d5db4f/README.md",
+        "https://github.com/PaddlePaddle/PaddleOCR/blob/main/LICENSE"
+      ],
+      "notes": "Exact upstream dictionary from the same immutable revision as the recognizer. Preserve duplicate entries and Unicode. Read using a restricted scalar-list parser; no additional YAML dependency."
     }
   ]
 }

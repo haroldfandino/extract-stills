@@ -184,6 +184,31 @@ class GuiSmokeTests(unittest.TestCase):
         self.window._toggle_theme()
         self.assertIn(gui.THEMES["light"]["card"], self.window.styleSheet())
 
+    def test_word_cues_are_plain_text_compact_and_optional(self):
+        ordinary = gui.CandidateCard(self.analysis, self.analysis["candidates"][0], False)
+        self.assertFalse(hasattr(ordinary, "text_snippet"))
+        ordinary.close()
+        reading = copy.deepcopy(self.analysis["candidates"][1])
+        reading.update(
+            text_contents=["Visible <b>wording</b> & a long subtitle repeated " * 8],
+            text_ready=False, text_reason="Detected word crop may omit letters",
+        )
+        card = gui.CandidateCard(self.analysis, reading, True)
+        self.window._clear_results()
+        self.window.results_layout.addWidget(card)
+        APP.processEvents()
+        self.assertEqual(card.text_readiness.text(), "Words incomplete")
+        self.assertEqual(card.text_snippet.textFormat(), Qt.PlainText)
+        self.assertLessEqual(card.text_snippet.text().count("\n"), 1)
+        self.assertIn("&lt;b&gt;", card.text_snippet.toolTip())
+        self.assertIn("omit letters", card.text_readiness.toolTip())
+        self.assertTrue(self.window.count_auto.isChecked())
+        for theme in ("light", "dark"):
+            self.window.theme_name = theme
+            self.window._apply_theme()
+            APP.processEvents()
+            self.assertLessEqual(card.text_snippet.height(), card.text_snippet.fontMetrics().lineSpacing() * 2 + 2)
+
     def test_inputs_deduplicate_and_review_label_updates(self):
         self.window.add_paths([self.analysis["source"], self.analysis["source"]])
         self.assertEqual(self.window.source_list.count(), 1)
@@ -327,6 +352,10 @@ def save_visuals() -> None:
     with tempfile.TemporaryDirectory(prefix="extract-stills-gui-visual-") as temporary:
         directory = Path(temporary)
         analysis = make_analysis(directory)
+        for item in analysis["candidates"]:
+            item["text_contents"] = ["A moment worth keeping" if item["scene_id"] == 0 else "Make it matter"]
+            item["text_ready"] = item["id"] != 0
+            item["text_reason"] = "Text is still entering" if item["id"] == 0 else "Repeated readable observed wording"
         settings = QSettings(str(directory / "settings.ini"), QSettings.IniFormat)
         window = gui.MainWindow(settings=settings)
         window.add_paths([analysis["source"]])
@@ -336,7 +365,7 @@ def save_visuals() -> None:
         window.status_label.setText("Ready for review · 1 completed · 0 failed")
         window.batch_label.setText("1/1 finished")
         window.progress_bar.setValue(100)
-        window.resize(1120, 1520)
+        window.resize(1120, 1670)
         window.show()
         for theme in ("light", "dark"):
             window.theme_name = theme

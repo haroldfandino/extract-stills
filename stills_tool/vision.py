@@ -2,8 +2,10 @@
 
 Coordinates are in the supplied BGR analysis image. Sharpness is the variance of
 the Laplacian on a normalized ROI; it is a relative metric, not a blur probability.
-Text confidence is DB foreground confidence. MediaPipe does not expose a raw
-per-face probability, so face confidence describes geometric reliability.
+Text detection confidence is DB foreground confidence. Text recognition
+confidence is the mean emitted-character CTC probability, not a calibrated
+legibility/completeness probability. MediaPipe does not expose a raw per-face
+probability, so face confidence describes geometric reliability.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import numpy as np
 MODEL_INFO = {
     "face": "MediaPipe Face Landmarker float16/1 (Apache-2.0)",
     "text": "PP-OCRv5 mobile detector ONNX (Apache-2.0)",
+    "text_recognition": "PP-OCRv5 Latin mobile recognizer ONNX (Apache-2.0)",
     "device": "CPU",
     "network_access": False,
     "face_confidence": "geometric reliability; not a model probability",
@@ -65,6 +68,32 @@ def _box(points: np.ndarray, width: int, height: int) -> list[int]:
     return [int(x0), int(y0), int(x1 - x0), int(y1 - y0)]
 
 
+def _border_ink(gray: np.ndarray, expanded: np.ndarray, contrast: float) -> bool:
+    """Detect glyph strokes cut by the canvas when DB support shrinks inward.
+
+    Only examine borders crossed by the original, unclamped padded polygon.
+    Uniform padding at the border does not mean clipped letters. Temporal text
+    agreement is still needed when a crop falls exactly between two letters.
+    """
+    height, width = gray.shape
+    x0, y0 = np.floor(expanded.min(axis=0)).astype(int)
+    x1, y1 = np.ceil(expanded.max(axis=0)).astype(int)
+    left, right = max(0, x0), min(width, x1+1)
+    top, bottom = max(0, y0), min(height, y1+1)
+    edges = []
+    if x0 <= 0 and bottom > top:
+        edges.append(gray[top:bottom, 0])
+    if x1 >= width-1 and bottom > top:
+        edges.append(gray[top:bottom, width-1])
+    if y0 <= 0 and right > left:
+        edges.append(gray[0, left:right])
+    if y1 >= height-1 and right > left:
+        edges.append(gray[height-1, left:right])
+    threshold = max(.08, contrast * .3)
+    return any((float(np.percentile(edge, 95))-float(np.percentile(edge, 5))) / 255 >= threshold
+               for edge in edges if edge.size >= 3)
+
+
 class LocalVision:
     """Load only verified local models; never fetch assets at runtime.
 
@@ -75,6 +104,7 @@ class LocalVision:
     def __init__(self, model_dir: str | Path | None = None):
         self._landmarker = None
         self._session = None
+        self._recognizer = None
         self._closed = False
         root = _resources()
         self.model_dir = Path(model_dir or os.environ.get("STILLS_MODEL_DIR", root / "models")).resolve()
@@ -89,7 +119,7 @@ class LocalVision:
                 raise ValueError("unsupported model manifest schema")
             entries = {entry["id"]: entry for entry in manifest["models"]}
             paths = {}
-            for model_id in ("face_landmarker", "text_detector"):
+            for model_id in ("face_landmarker", "text_detector", "text_recognizer", "text_dictionary"):
                 entry = entries[model_id]
                 if Path(entry["filename"]).name != entry["filename"]:
                     raise ValueError("model manifest contains an unsafe filename")
@@ -100,6 +130,8 @@ class LocalVision:
                     raise MissingModelsError(f"Local model verification failed: {path}. {hint}")
                 paths[model_id] = path
             self.model_info = dict(MODEL_INFO, models=manifest["models"])
+            self._model_paths = paths
+            self._model_hint = hint
         except MissingModelsError:
             raise
         except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -138,19 +170,190 @@ class LocalVision:
             self.close()
             raise MissingModelsError(f"Could not load the offline CPU vision runtime: {exc}. {hint}") from exc
 
-    def analyze(self, frame_bgr: np.ndarray) -> dict[str, Any]:
-        if self._closed:
-            raise RuntimeError("LocalVision has been closed")
+    @staticmethod
+    def _validate_frame(frame_bgr: np.ndarray) -> np.ndarray:
         if not isinstance(frame_bgr, np.ndarray) or frame_bgr.dtype != np.uint8:
             raise ValueError("LocalVision requires a uint8 BGR analysis frame")
         if frame_bgr.ndim != 3 or frame_bgr.shape[2] != 3 or min(frame_bgr.shape[:2]) < 2:
             raise ValueError("LocalVision requires a nonempty H x W x 3 BGR analysis frame")
-        frame_bgr = np.ascontiguousarray(frame_bgr)
+        return np.ascontiguousarray(frame_bgr)
+
+    def analyze(self, frame_bgr: np.ndarray, recognize: bool = False) -> dict[str, Any]:
+        if self._closed:
+            raise RuntimeError("LocalVision has been closed")
+        frame_bgr = self._validate_frame(frame_bgr)
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         warnings: list[str] = []
         faces = self._faces(frame_bgr, gray, warnings)
         text = self._text(frame_bgr, gray)
+        if recognize:
+            text = self.recognize_text(frame_bgr, text)
         return {"faces": faces, "text": text, "warnings": warnings}
+
+    def recognize_text(self, frame_bgr: np.ndarray, regions: list[dict] | None = None) -> list[dict]:
+        """Recognize native-frame crops without running face inference again.
+
+        Supplied regions must use this frame's coordinates. A caller analyzing
+        downscaled previews must scale boxes and both polygon fields first.
+        The model loads lazily, but all bundled assets are verified at startup.
+        """
+        if self._closed:
+            raise RuntimeError("LocalVision has been closed")
+        frame_bgr = self._validate_frame(frame_bgr)
+        if regions is None:
+            regions = self._text(frame_bgr, cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY))
+        if not regions:
+            return []
+        if self._recognizer is None:
+            try:
+                from .text_ocr import TextRecognizer
+
+                self._recognizer = TextRecognizer(self._model_paths["text_recognizer"],
+                                                  self._model_paths["text_dictionary"])
+            except Exception as exc:
+                raise MissingModelsError(f"Could not load the offline CPU text recognizer: {exc}. "
+                                         f"{self._model_hint}") from exc
+        return self._recognizer.recognize(frame_bgr, regions)
+
+    def refine_text_regions(self, frame_bgr: np.ndarray, regions: list[dict]) -> list[dict]:
+        """Redetect native text bands whose preview boxes can cut whole words.
+
+        Same-baseline pieces and long small-print lines benefit from a higher
+        effective detector resolution. Individual large captions keep their
+        original geometry. Crops retain context, but only detections overlapping
+        the source band replace it; neighboring rows do not leak into the band.
+        Artificial crop clipping is reported separately from video clipping.
+        """
+        if self._closed:
+            raise RuntimeError("LocalVision has been closed")
+        frame_bgr = self._validate_frame(frame_bgr)
+        if not regions:
+            return []
+        height, width = frame_bgr.shape[:2]
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        bands: list[list[tuple[int, dict]]] = []
+        untouched = []
+        for index, region in sorted(enumerate(regions), key=lambda pair: (
+                pair[1]["box"][1] + pair[1]["box"][3] / 2, pair[1]["box"][0])):
+            x, y, w, h = region["box"]
+            if min(w, h) <= 0 or w / h < .85:
+                untouched.append(dict(region))
+                continue
+            candidates = []
+            for band_index, band in enumerate(bands):
+                band_height = float(np.median([item[1]["box"][3] for item in band]))
+                baseline = float(np.median([item[1]["box"][1] + item[1]["box"][3] / 2 for item in band]))
+                distance = abs(y + h / 2 - baseline)
+                if max(h, band_height) / min(h, band_height) <= 1.8 and distance <= .45 * min(h, band_height):
+                    candidates.append((distance, band_index))
+            if candidates:
+                bands[min(candidates)[1]].append((index, region))
+            else:
+                bands.append([(index, region)])
+
+        output = untouched
+        for band in bands:
+            originals = [item[1] for item in band]
+            median_height = float(np.median([item["box"][3] for item in originals]))
+            fine_print = any(item["box"][3] <= 40 and item["box"][2] / item["box"][3] >= 12
+                             for item in originals)
+            if len(originals) == 1 and not fine_print:
+                output.extend(dict(item) for item in originals)
+                continue
+            left = min(item["box"][0] for item in originals)
+            top = min(item["box"][1] for item in originals)
+            right = max(item["box"][0] + item["box"][2] for item in originals)
+            bottom = max(item["box"][1] + item["box"][3] for item in originals)
+            margin = min(96, max(32, round(median_height)))
+            chosen = []
+            for attempt in range(2):
+                context = margin * (attempt + 1)
+                x0, y0 = max(0, int(left-context)), max(0, int(top-context))
+                x1, y1 = min(width, int(right+context)), min(height, int(bottom+context))
+                if x1 <= x0 or y1 <= y0:
+                    break
+                crop = frame_bgr[y0:y1, x0:x1]
+                local_regions = self._text(crop, gray[y0:y1, x0:x1])
+                translated = []
+                for local in local_regions:
+                    item = dict(local)
+                    rx, ry, rw, rh = local["box"]
+                    item["box"] = [int(rx+x0), int(ry+y0), int(rw), int(rh)]
+                    ix, iy, iw, ih = item["box"]
+                    center_y = iy + ih / 2
+                    overlap = max(0, min(ix+iw, right)-max(ix, left)) * max(0, min(iy+ih, bottom)-max(iy, top))
+                    if (not top-.2*median_height <= center_y <= bottom+.2*median_height
+                            or overlap / max(1, iw*ih) < .1):
+                        continue
+                    for key in ("polygon", "raw_polygon"):
+                        if key in local:
+                            item[key] = [[float(px+x0), float(py+y0)] for px, py in local[key]]
+                    raw = np.asarray(item.get("raw_polygon", item["polygon"]), np.float32)
+                    raw_source_clip = bool((raw[:, 0] <= 1).any() or (raw[:, 0] >= width-2).any()
+                                           or (raw[:, 1] <= 1).any() or (raw[:, 1] >= height-2).any())
+                    padded = np.asarray(item["polygon"], np.float32)
+                    source_clip = raw_source_clip or _border_ink(gray, padded, item.get("contrast", 0))
+                    # Local detector clipping may refer to an artificial crop
+                    # edge. It does not establish that original video text is cut.
+                    artificial_clip = bool(local.get("clipped", False) and not source_clip)
+                    item.update(clipped=bool(source_clip), refined_native=True,
+                                complete_geometry=not artificial_clip and not source_clip,
+                                refinement_source_indices=[index for index, _ in band])
+                    if artificial_clip:
+                        item["geometry_warning"] = "Text reaches a regional crop boundary; complete native glyphs are uncertain."
+                    translated.append(item)
+                chosen = translated
+                if not any(not item["complete_geometry"] and not item["clipped"] for item in chosen):
+                    break
+            # Avoid replacing a whole band when redetection loses an original
+            # region. A DB merge may cover several source pieces, or vice versa.
+            def covered(original: dict) -> bool:
+                ox, oy, ow, oh = original["box"]
+                area = 0
+                for item in chosen:
+                    ix, iy, iw, ih = item["box"]
+                    area += max(0, min(ox+ow, ix+iw)-max(ox, ix)) * max(0, min(oy+oh, iy+ih)-max(oy, iy))
+                return area / max(1, ow*oh) >= .20
+            if chosen and all(covered(item) for item in originals):
+                # DB's expanded rectangles can overlap the next word even when
+                # the raw detector supports are disjoint. Bound OCR context at
+                # the middle of that gap so "benefits that" cannot acquire the
+                # first "s" of a separately detected "support". Keep detection
+                # geometry unchanged for scoring and source-coordinate traces.
+                horizontal = sorted(chosen, key=lambda item: item["box"][0])
+                for previous, following in zip(horizontal, horizontal[1:]):
+                    first = np.asarray(previous["raw_polygon"], np.float32)
+                    second = np.asarray(following["raw_polygon"], np.float32)
+                    first_right, second_left = float(first[:, 0].max()), float(second[:, 0].min())
+                    if first_right > second_left:
+                        continue
+                    boundary = (first_right+second_left) / 2
+                    first_crop = np.asarray(previous.get("recognition_polygon", previous["polygon"]), np.float32)
+                    second_crop = np.asarray(following.get("recognition_polygon", following["polygon"]), np.float32)
+                    if first_crop[:, 0].max() > boundary:
+                        first_crop[:, 0] = np.minimum(first_crop[:, 0], boundary)
+                        previous["recognition_polygon"] = first_crop.tolist()
+                    if second_crop[:, 0].min() < boundary:
+                        second_crop[:, 0] = np.maximum(second_crop[:, 0], boundary)
+                        following["recognition_polygon"] = second_crop.tolist()
+                output.extend(chosen)
+            else:
+                output.extend(dict(item) for item in originals)
+
+        deduplicated = []
+        for item in sorted(output, key=lambda region: (not region.get("refined_native", False),
+                                                       region["box"][1], region["box"][0])):
+            x, y, w, h = item["box"]
+            duplicate = False
+            for previous in deduplicated:
+                px, py, pw, ph = previous["box"]
+                intersection = max(0, min(x+w, px+pw)-max(x, px)) * max(0, min(y+h, py+ph)-max(y, py))
+                if intersection / max(1, w*h+pw*ph-intersection) >= .65:
+                    duplicate = True
+                    break
+            if not duplicate:
+                deduplicated.append(item)
+        return sorted(deduplicated, key=lambda item: (item["box"][1], item["box"][0]))
 
     def _faces(self, frame: np.ndarray, gray: np.ndarray, warnings: list[str]) -> list[dict]:
         height, width = frame.shape[:2]
@@ -226,6 +429,11 @@ class LocalVision:
             if min(rw, rh) < 3:
                 continue
             quadrilateral = cv2.boxPoints(rectangle)
+            # Retain raw detector support before DB padding or canvas clamping.
+            # An expanded box crossing a border does not imply clipped letters.
+            raw_polygon = quadrilateral * [width / map_w, height / map_h]
+            clipped = bool((quadrilateral[:, 0] <= 1).any() or (quadrilateral[:, 0] >= map_w-2).any()
+                           or (quadrilateral[:, 1] <= 1).any() or (quadrilateral[:, 1] >= map_h-2).any())
             left, top, right, bottom = cv2.boundingRect(quadrilateral.astype(np.int32))
             right += left
             bottom += top
@@ -242,8 +450,11 @@ class LocalVision:
             # edge offsets yield this expanded minimum-area rectangle directly.
             offset = rw * rh * 1.5 / max(2 * (rw + rh), 1e-6)
             expanded = cv2.boxPoints(((cx, cy), (rw + 2*offset, rh + 2*offset), angle))
-            expanded[:, 0] = np.clip(expanded[:, 0] * width / map_w, 0, width-1)
-            expanded[:, 1] = np.clip(expanded[:, 1] * height / map_h, 0, height-1)
+            expanded[:, 0] *= width / map_w
+            expanded[:, 1] *= height / map_h
+            unclamped = expanded.copy()
+            expanded[:, 0] = np.clip(expanded[:, 0], 0, width-1)
+            expanded[:, 1] = np.clip(expanded[:, 1], 0, height-1)
             box = _box(expanded, width, height)
             x, y, w, h = box
             region = gray[y:y+h, x:x+w]
@@ -251,9 +462,12 @@ class LocalVision:
             cv2.fillPoly(polygon_mask, [(expanded - [x, y]).astype(np.int32)], 1)
             samples = region[polygon_mask != 0]
             contrast = float((np.percentile(samples, 90) - np.percentile(samples, 10)) / 255) if samples.size else 0.0
+            clipped = clipped or _border_ink(gray, unclamped, contrast)
             detections.append({
                 "box": box,
                 "polygon": [[round(float(px), 2), round(float(py), 2)] for px, py in expanded],
+                "raw_polygon": [[round(float(px), 2), round(float(py), 2)] for px, py in raw_polygon],
+                "clipped": clipped,
                 "confidence": float(np.clip(confidence, 0, 1)),
                 "sharpness": _sharpness(region),
                 "contrast": float(np.clip(contrast, 0, 1)),
@@ -265,6 +479,7 @@ class LocalVision:
             self._landmarker.close()
             self._landmarker = None
         self._session = None
+        self._recognizer = None
         self._closed = True
 
     def __enter__(self) -> "LocalVision":

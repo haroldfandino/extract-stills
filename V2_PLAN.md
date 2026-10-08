@@ -56,3 +56,9 @@ Create a Qt-independent core with separate analysis, selection, and export opera
 - Review representative 6-, 15-, 30-second and longer clips before declaring V2 stable. Merge `codex/v2.0` through a reviewed PR only after these gates pass, then tag `v2.0.0`.
 
 Defaults: CPU processing, automatic selection, nonrecursive folder scanning, natural expressions, and scene coverage that may exceed the duration target. Intel Macs and cloud processing are outside V2 scope.
+
+## Approved refinement: October 8, 2026
+
+- Improve focus accuracy with noise-resistant multiscale measurements on original face/text pixels, continuous candidate rankings and wider native-frame searches.
+- Cover complete, readable wording changes within shots using offline recognition and temporal/layout consensus. Avoid typewriter fragments, clipped words, incidental OCR flicker and fragmented detector boxes.
+- Keep automatic counts as the default, with the existing duration anchors and explicit count override. Automatic targets may grow to cover additional readable wording; exact duplicate images can cover repeated occurrences without exporting redundant files.

@@ -17,6 +17,10 @@ def write_reports(analysis, output_dir=None):
                "scene_id": candidate["scene_id"], "score": candidate["score"],
                "tier": candidate["tier"], "selected": candidate["id"] in selected,
                "eligible": candidate["eligible"], "duplicate_of": candidate["duplicate_of"],
+               "text_state_id": candidate.get("text_state_id"),
+               "recognized_text": json.dumps(candidate.get("text_contents", []), ensure_ascii=False),
+               "text_ready": candidate.get("text_ready", True),
+               "native_focus": json.dumps(candidate["metrics"].get("native_focus", {})),
                "reasons": "; ".join(candidate["reasons"]),
                "metrics": json.dumps(candidate["metrics"])}
         rows.append(row)
@@ -28,7 +32,9 @@ def write_reports(analysis, output_dir=None):
             f'<a href="{e(link, quote=True)}"><img loading="lazy" src="{e(link, quote=True)}" alt="Frame {candidate["id"]}"></a>'
             f'<strong>Frame {candidate["id"]} · {candidate["timestamp"]:.3f}s</strong>'
             f'<p>Scene {candidate["scene_id"] + 1} · {candidate["tier"]} · {candidate["score"]:.1f}/100'
-            f'{" · SELECTED" if row["selected"] else ""}</p><p>{e(row["reasons"])}</p></article>')
+            f'{" · SELECTED" if row["selected"] else ""}</p><p>{e(row["reasons"])}</p>'
+            f'<p>{e(" · ".join(candidate.get("text_contents", [])))}</p>'
+            f'<p>{e(candidate.get("text_reason", ""))}</p></article>')
     with (directory / "scores.csv").open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(rows[0]) if rows else [
             "frame_index", "timestamp", "scene_id", "score", "tier", "selected", "eligible",
@@ -39,6 +45,7 @@ def write_reports(analysis, output_dir=None):
                ("schema_version", "scoring_version", "source", "target", "base_target",
                 "selected_ids", "end_card_id", "warnings")}
     summary["candidates"] = rows
+    summary["text_states"] = analysis.get("text_states", [])
     (directory / "scores.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     warnings = "".join(f"<li>{html.escape(w)}</li>" for w in analysis["warnings"])
     document = f"""<!doctype html><html lang="en"><meta charset="utf-8">

@@ -1,7 +1,9 @@
 """Provision pinned local models. This developer/build command needs the internet.
 
 Runtime extraction never calls this script or downloads models. No conversion or
-Paddle framework is needed: the manifest pins PaddlePaddle's official ONNX file.
+Paddle framework is needed: the manifest pins PaddlePaddle's official ONNX files
+and the matching Latin recognizer configuration/character dictionary. The default
+command provisions every asset needed by smart extraction, including text OCR.
 """
 
 from __future__ import annotations

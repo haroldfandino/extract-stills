@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from html import escape
 from pathlib import Path
 import sys
 import threading
@@ -29,7 +30,7 @@ def _prepare_qt_runtime() -> None:
 
 _prepare_qt_runtime()
 
-from PySide6.QtCore import Qt, QSettings, QThread, Signal, QUrl, QSize, QPoint
+from PySide6.QtCore import Qt, QSettings, QThread, Signal, QUrl, QSize, QPoint, QEvent
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap, QPen, QPalette, QPolygon
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
@@ -98,6 +99,9 @@ def build_stylesheet(theme: dict[str, str]) -> str:
         QLabel#Warning {{ color: {theme['amber']}; }}
         QLabel#Error {{ color: {theme['red']}; }}
         QLabel#Success {{ color: {theme['green']}; }}
+        QLabel#TextSnippet {{ color: {theme['muted']}; font-size: 12px; }}
+        QLabel#TextReadiness[ready="true"] {{ color: {theme['green']}; font-weight: 600; }}
+        QLabel#TextReadiness[ready="false"] {{ color: {theme['amber']}; font-weight: 600; }}
         QLabel#High {{
             color: {theme['green']}; background: {theme['green_bg']};
             border-radius: 8px; padding: 3px 8px; font-size: 11px; font-weight: 600;
@@ -209,9 +213,14 @@ def _button(text: str, primary: bool = False) -> QToolButton:
 
 def _label(text: str, style: str | None = None) -> QLabel:
     label = QLabel(text)
+    label.setTextFormat(Qt.PlainText)
     if style:
         label.setObjectName(style)
     return label
+
+
+def _safe_tooltip(text: str) -> str:
+    return "<qt>" + escape(text).replace("\n", "<br>") + "</qt>"
 
 
 def _preview_path(analysis: dict, candidate: dict) -> Path:
@@ -234,6 +243,42 @@ class ChoiceComboBox(QComboBox):
             QPoint(x - 4, y - 2), QPoint(x + 4, y - 2), QPoint(x, y + 3),
         ]))
         painter.end()
+
+
+class CompactTextLabel(QLabel):
+    """Two plain-text lines with a full tooltip, including untrusted OCR strings."""
+
+    def __init__(self, text: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.full_text = " ".join(text.split())
+        self.setTextFormat(Qt.PlainText)
+        self.setObjectName("Muted")
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.setToolTip(_safe_tooltip(text))
+        self._fit()
+
+    def _fit(self) -> None:
+        metrics = self.fontMetrics()
+        width = max(20, self.width())
+        words = self.full_text.split()
+        first = []
+        while words and metrics.horizontalAdvance(" ".join(first + [words[0]])) <= width:
+            first.append(words.pop(0))
+        if not first and words:
+            first.append(metrics.elidedText(words.pop(0), Qt.ElideRight, width))
+        line_one = " ".join(first)
+        line_two = metrics.elidedText(" ".join(words), Qt.ElideRight, width)
+        super().setText(line_one + ("\n" + line_two if line_two else ""))
+        self.setFixedHeight(metrics.lineSpacing() * 2 + 2)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._fit()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() in (QEvent.FontChange, QEvent.StyleChange) and hasattr(self, "full_text"):
+            self._fit()
 
 
 class PreviewDialog(QDialog):
@@ -348,6 +393,22 @@ class CandidateCard(QFrame):
         note.setWordWrap(True)
         note.setToolTip("\n".join(reasons))
         layout.addWidget(note)
+        contents = [str(value) for value in candidate.get("text_contents", [])]
+        if contents or candidate.get("text_ready") is False:
+            ready = candidate.get("text_ready", True)
+            self.text_readiness = _label("Words ready" if ready else "Words incomplete", "Success" if ready else "Warning")
+            self.text_readiness.setObjectName("TextReadiness")
+            # A palette-independent property lets both themes choose readable
+            # status colors through the main stylesheet.
+            self.text_readiness.setProperty("ready", ready)
+            reason = str(candidate.get("text_reason", "Readability and completeness are estimates from the observed text"))
+            self.text_readiness.setToolTip(_safe_tooltip(reason))
+            layout.addWidget(self.text_readiness)
+            full = " · ".join(contents) or "Detected text has no complete reading yet"
+            self.text_snippet = CompactTextLabel("Text: " + full, self)
+            self.text_snippet.setObjectName("TextSnippet")
+            self.text_snippet.setToolTip(_safe_tooltip(full + "\n\n" + reason))
+            layout.addWidget(self.text_snippet)
         layout.addStretch(1)
         self.checkbox = QCheckBox("Select this frame")
         self.checkbox.setObjectName(f"candidate_{candidate['id']}")
@@ -525,10 +586,13 @@ class VideoReviewCard(QFrame):
         self._update_summary()
 
     def _update_summary(self) -> None:
-        self.summary.setText(
+        summary = (
             f"{len(self.selection)} selected  ·  target {self.analysis.get('target', 0)}  ·  "
             f"{len(self.analysis.get('scenes', []))} scenes"
         )
+        if self.analysis.get("text_states"):
+            summary += f"  ·  {len(self.analysis['text_states'])} wording moments"
+        self.summary.setText(summary)
         self.export_button.setEnabled(bool(self.selection) and not self.busy)
 
     def set_selected(self, candidate_id: int, selected: bool) -> None:

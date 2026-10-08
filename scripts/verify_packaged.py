@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import math
 import subprocess
 import struct
 import sys
@@ -90,6 +91,9 @@ def validate_assets(resources: Path) -> None:
         entries = list(entries.values())
     if not entries:
         raise ValueError("Bundle has no declared offline models.")
+    required = {"face_landmarker", "text_detector", "text_recognizer", "text_dictionary"}
+    if not required.issubset({entry.get("id") for entry in entries}):
+        raise ValueError("Bundle must declare the face, text detector, Latin recognizer, and exact dictionary assets.")
     for entry in entries:
         name = entry.get("filename") or entry.get("file") or entry.get("path")
         path = (resources / "models" / name).resolve()
@@ -97,9 +101,71 @@ def validate_assets(resources: Path) -> None:
             raise ValueError(f"Missing bundled model: {name}")
         if digest(path) != entry["sha256"].lower():
             raise ValueError(f"Bundled model checksum mismatch: {name}")
+        if path.stat().st_size != entry["size_bytes"]:
+            raise ValueError(f"Bundled asset size mismatch: {name}")
     for notice in ("EXTRACT-STILLS-LICENSE.txt", "FFMPEG-BINARIES.json", "PYTHON-PACKAGES.json", "MODEL-MANIFEST.json"):
         if not (resources / "licenses" / notice).is_file():
             raise ValueError(f"Missing bundled notice: {notice}")
+
+
+def make_word_fixture(ffmpeg: Path, cwd: Path, env: dict[str, str]) -> tuple[Path, list[str]]:
+    """Generate three captions without fonts installed by the OS or drawtext.
+
+    Pillow's pinned, embedded TrueType default font creates source fixture pixels
+    on the verification host. Recognition itself runs only in the frozen app.
+    """
+    from PIL import Image, ImageDraw, ImageFont
+
+    expected = ["alpha", "bravo", "clear"]
+    font = ImageFont.load_default(size=48)
+    frames = []
+    for word in expected:
+        image = Image.new("RGB", (960, 540), (55, 55, 55))
+        draw = ImageDraw.Draw(image)
+        draw.text((120, 225), word.upper(), font=font, fill=(250, 250, 250))
+        frames.append(image.tobytes() * 10)
+    source = cwd / "changed-captions.mkv"
+    result = subprocess.run([
+        str(ffmpeg), "-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
+        "-video_size", "960x540", "-framerate", "24", "-i", "pipe:0", "-c:v", "ffv1", str(source),
+    ], input=b"".join(frames), cwd=cwd, env=env, capture_output=True, timeout=60)
+    if result.returncode:
+        raise RuntimeError("Failed to encode the changed-caption fixture: " + result.stderr.decode("utf-8", "replace"))
+    return source, expected
+
+
+def verify_word_states(cli: Path, ffmpeg: Path, cwd: Path, env: dict[str, str]) -> dict:
+    source, expected = make_word_fixture(ffmpeg, cwd, env)
+    before = digest(source)
+    result = run([str(cli), "extract", str(source), "--output", str(cwd / "word_output"), "--json"], cwd, env)
+    extracted = json.loads(result.stdout)["results"][0]
+    analysis = json.loads(Path(extracted["analysis"]).read_text(encoding="utf-8"))
+    states = analysis["text_states"]
+    observed = [[str(word).casefold() for word in state["text"]] for state in states]
+    if observed != [[word] for word in expected]:
+        raise ValueError(f"Frozen OCR did not retain every complete changed caption: {observed!r}")
+    exported = {entry["frame_index"]: entry for entry in extracted["files"]}
+    candidates = {entry["id"]: entry for entry in analysis["candidates"]}
+    for state, word in zip(states, expected):
+        selected = state["selected_frame_id"]
+        if selected not in exported or not exported[selected]["text_ready"]:
+            raise ValueError(f"Frozen selection did not export a readable representative for {word}.")
+        if [str(value).casefold() for value in exported[selected]["recognized_text"]] != [word]:
+            raise ValueError(f"Exported recognized wording does not match {word}.")
+        if state["id"] not in exported[selected]["text_state_ids"]:
+            raise ValueError(f"Exported caption coverage metadata is incomplete for {word}.")
+        candidate = candidates[selected]
+        focus = candidate["metrics"].get("native_focus", {})
+        text_focus = focus.get("text")
+        if focus.get("measurement") != "native source pixels" or not isinstance(text_focus, (int, float)) or not math.isfinite(text_focus) or text_focus <= 0:
+            raise ValueError(f"Frozen native sharpness analysis has no positive text-region focus evidence for {word}.")
+    if analysis["base_target"] != 2 or len(exported) != 3 or analysis["target"] < 3:
+        raise ValueError("Automatic count did not grow from the duration target to preserve three changed captions.")
+    if digest(source) != before:
+        raise ValueError("Caption extraction modified the synthetic source.")
+    return {"recognized_captions": expected, "text_states": len(states), "exported_captions": len(exported),
+            "base_target": analysis["base_target"], "target": analysis["target"],
+            "complete_wording_coverage": True, "native_text_focus_verified": True}
 
 
 def macos_audit(executables: list[Path]) -> dict:
@@ -176,6 +242,7 @@ def main() -> int:
             validate_tiff(Path(tiff_result["files"][0]["path"]))
             if digest(fixture) != original:
                 raise ValueError("Extraction modified its source fixture.")
+            wording = verify_word_states(cli, ffmpeg, cwd, env)
             if args.gui:
                 gui = args.gui.resolve()
                 validate_assets(bundle_resources(gui))
@@ -193,6 +260,7 @@ def main() -> int:
                               "restricted_path": True, "source_preserved": True,
                               "original_resolution": True, "png_8bit_icc_verified": True,
                               "tiff_16bit_icc_verified": True,
+                              "wording_and_sharpness": wording,
                               "offline_assets_verified": True, "gui_smoke_test": bool(args.gui)}
             if sys.platform == "darwin":
                 payload["macos_dependency_audit"] = macos_audit([cli] + ([args.gui.resolve()] if args.gui else []))
