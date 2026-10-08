@@ -196,6 +196,8 @@ def _canonical_lines(regions: list[dict]) -> list[dict]:
 
 def _appearance_consensus(entries: list[tuple[dict, dict]]) -> None:
     """Resolve different OCR readings only when original glyph pixels agree."""
+    if len({region["text"] for _, region in entries if region["text"]}) <= 1:
+        return
     leaders, groups = [], []
     for observation, region in entries:
         if not region["text"] or not region.get("appearance", {}).get("available"):
@@ -588,14 +590,28 @@ def assign_text_states(candidates: list[dict], scenes: list[dict], video: dict) 
     for track in reliable_tracks:
         entries = history[track]
         pattern_flags = sum(region["pattern_evidence"].get("unlikely_repeated_glyphs", False) for _, region in entries)
-        nonpattern_readings = [
-            region for _, region in entries
-            if region["text"] and region["confidence"] >= MIN_CONFIDENCE
+        nonpattern_positions = {
+            position for position, (_, region) in enumerate(entries)
+            if region["text"] and region["confidence"] >= 0.80
             and not region["pattern_evidence"].get("unlikely_repeated_glyphs", False)
             and (not region["pattern_evidence"].get("available")
                  or region["pattern_evidence"].get("periodicity", 1) >= 0.35)
-        ]
-        if pattern_flags >= 2 and not nonpattern_readings:
+        }
+        # A texture can occasionally be read as mixed digits, which makes the
+        # repeated-glyph measurement unavailable. Such an isolated reading is
+        # not evidence that the same track contains actual printed text. Keep
+        # real text when adjacent observations agree, including numeric values.
+        corroborated_nonpattern = any(
+            position in nonpattern_positions and position + 1 in nonpattern_positions
+            and first[1]["text"] == second[1]["text"]
+            and MIN_CONFIRMED_SPAN <= (
+                second[0]["candidate"]["timestamp"] - first[0]["candidate"]["timestamp"]
+                + _frame_duration(second[0]["candidate"], video)
+            )
+            and 0 < second[0]["candidate"]["timestamp"] - first[0]["candidate"]["timestamp"] <= 0.25
+            for position, (first, second) in enumerate(zip(entries, entries[1:]))
+        )
+        if pattern_flags >= 2 and not corroborated_nonpattern:
             ignored_auxiliary.add(track)
             continue
         sizes = [region["box"][2] * region["box"][3] / area for _, region in entries]
@@ -716,6 +732,10 @@ def assign_text_states(candidates: list[dict], scenes: list[dict], video: dict) 
                      if position + 1 < len(runs)
                      else scene_lookup.get(items[-1]["scene"], {}).get("end", last["timestamp"] + _frame_duration(last, video)))
         duration = max(0, float(next_time) - first["timestamp"])
+        # Candidate times quantize a nominal 0.20s transition to source frames.
+        # Half a frame avoids treating a five-frame/24fps prefix as a held
+        # message, while a deliberately held 0.25s caption remains distinct.
+        brief_limit = BRIEF_FRAGMENT_SECONDS + _frame_duration(first, video) / 2
         before = runs[position - 1] if position else None
         after = runs[position + 1] if position + 1 < len(runs) else None
         growth = max(_snapshot_growth(run, before, diagonal), _snapshot_growth(run, after, diagonal))
@@ -730,7 +750,7 @@ def assign_text_states(candidates: list[dict], scenes: list[dict], video: dict) 
             (position + 1 < len(prefixes) and prefixes[position] and prefixes[position + 1])
             or (position > 0 and position < len(prefixes) and prefixes[position - 1] and prefixes[position])
         )
-        brief_fragment = duration < BRIEF_FRAGMENT_SECONDS and prefix_signal and (phrase_context or prefix_chain)
+        brief_fragment = duration < brief_limit and prefix_signal and (phrase_context or prefix_chain)
         # Several labels appearing together are one entering layout, rather than
         # multiple complete headlines. A held SALE -> SALE NOW still has only
         # one changed line and retains its distinct wording occurrences.
@@ -757,16 +777,27 @@ def assign_text_states(candidates: list[dict], scenes: list[dict], video: dict) 
         brief_fragment |= duration < 0.60 and entering_paragraph
         fragment_window = range(bisect_left(run_times, first["timestamp"] - 0.5),
                                 bisect_right(run_times, first["timestamp"] + 0.5))
-        brief_fragment |= duration < BRIEF_FRAGMENT_SECONDS and any(
+        # A held caption may start seconds earlier while its last complete
+        # observation is immediately before an occlusion/exit. Its ending,
+        # rather than only its starting time, supplies the nearby evidence.
+        fragment_neighbors = list(fragment_window)
+        if before and first["timestamp"] - before["observations"][-1]["candidate"]["timestamp"] <= 0.5:
+            fragment_neighbors.append(position - 1)
+        brief_fragment |= duration < brief_limit and any(
             index != position and _prominent_phrase_fragment(run, runs[index], diagonal, video.get("height", 540))
-            for index in fragment_window
+            for index in fragment_neighbors
+        )
+        brief_fragment |= (
+            duration < brief_limit and before is not None
+            and first["timestamp"] - before["observations"][-1]["candidate"]["timestamp"] <= 0.5
+            and _line_additions(run, before, diagonal)
         )
         rolling_chain = (
             (position > 0 and position < len(rolling) and rolling[position - 1] and rolling[position])
             or (position + 1 < len(rolling) and rolling[position] and rolling[position + 1])
             or (position >= 2 and rolling[position - 2] and rolling[position - 1])
         )
-        brief_fragment |= duration < BRIEF_FRAGMENT_SECONDS and rolling_chain
+        brief_fragment |= duration < brief_limit and rolling_chain
         span = last["timestamp"] - first["timestamp"] + _frame_duration(last, video)
         confirmations = sum(
             all(region["text"] and region["confidence"] >= MIN_CONFIDENCE
@@ -796,7 +827,7 @@ def assign_text_states(candidates: list[dict], scenes: list[dict], video: dict) 
                 if "appearance_identity" in region
             ))
             bridge = (
-                previous is not None and previous["text"] == items[0]["contents"]
+                previous is not None and previous["_signature"] == run["signature"]
                 and first["timestamp"] - previous["end"] <= 0.4
                 and previous["_scene"] == run["scene"]
                 and previous["_appearance"] == appearance_classes
@@ -813,6 +844,7 @@ def assign_text_states(candidates: list[dict], scenes: list[dict], video: dict) 
                     "start": first["timestamp"], "end": last["timestamp"] + _frame_duration(last, video),
                     "_scene": run["scene"],
                     "_appearance": appearance_classes,
+                    "_signature": run["signature"],
                 })
 
     for observation in observations:
@@ -889,4 +921,5 @@ def assign_text_states(candidates: list[dict], scenes: list[dict], video: dict) 
     for state in accepted:
         state.pop("_scene", None)
         state.pop("_appearance", None)
+        state.pop("_signature", None)
     return accepted

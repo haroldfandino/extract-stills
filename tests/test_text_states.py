@@ -420,12 +420,124 @@ def test_actual_field_value_change_is_preserved_during_y_sort_jitter():
     assert {"july", "morning"} == set(states[1]["text"])
 
 
+@pytest.mark.parametrize("last_month,expected", [("JUNE", 1), ("JULY", 2)])
+def test_brief_ocr_gap_bridges_stable_fields_despite_reading_order(last_month, expected):
+    candidates = []
+    for index in range(5):
+        first_y, second_y = (100, 103) if index < 3 else (105, 99)
+        fields = [region("JUNE" if index < 3 else last_month, box=[100, first_y, 90, 30])]
+        if index != 2:
+            fields.append(region("MORNING", box=[450, second_y, 150, 30]))
+        candidates.append(candidate(index, index * 0.1, fields))
+    states = assign(candidates)
+    assert len(states) == expected
+    assert not candidates[2]["text_ready"]
+    assert all(item["text_ready"] for item in candidates[:2] + candidates[3:])
+    assert candidates[3]["text_state_id"] == expected - 1
+
+
+def test_occluded_prefix_after_a_long_held_caption_is_not_complete():
+    values = [("Trusted by", time) for time in (0, 0.5, 1, 1.5, 2, 2.3)]
+    values += [("Trusted", 2.34), ("Trusted", 2.38), ("Next shot", 2.43), ("Next shot", 2.6)]
+    candidates = [candidate(index, time, [region(text, box=[150, 250, 180, 40])])
+                  for index, (text, time) in enumerate(values)]
+    states = assign(candidates)
+    assert [state["text"] for state in states] == [["trusted by"], ["next shot"]]
+    assert not candidates[6]["text_ready"] and not candidates[7]["text_ready"]
+    assert all(item["text_ready"] for item in candidates[:6] + candidates[8:])
+
+
+@pytest.mark.parametrize("hold,complete", [(5 / 24, False), (0.25, True)])
+def test_short_phrase_threshold_accounts_for_half_frame_quantization(hold, complete):
+    candidates = [candidate(0, 0, [region("SALE")]), candidate(1, 0.1, [region("SALE")]),
+                  candidate(2, hold, [region("SALE NOW")]), candidate(3, hold + 0.1, [region("SALE NOW")])]
+    states = assign(candidates)
+    assert candidates[0]["text_ready"] is complete
+    assert candidates[1]["text_ready"] is complete
+    assert len(states) == (2 if complete else 1)
+
+
+def test_short_exiting_paragraph_waits_for_all_observed_words():
+    lines = [("C15:0 helps", [100, 200, 260, 40]),
+             ("restore and protect", [430, 180, 400, 40]),
+             ("your cells", [430, 260, 230, 40])]
+    candidates = [candidate(index, time, [region(text, box=box) for text, box in lines])
+                  for index, time in enumerate((0, 0.5, 1, 1.5, 2))]
+    candidates += [candidate(5 + index, 2.05 + index * 0.04, [region(*lines[0][:1], box=lines[0][1])])
+                   for index in range(2)]
+    candidates += [candidate(7 + index, 2.15 + index * 0.1, [region("NEXT MESSAGE")])
+                   for index in range(2)]
+    states = assign(candidates)
+    assert len(states) == 2
+    assert all(not item["text_ready"] for item in candidates[5:7])
+    assert all(item["text_ready"] for item in candidates[:5] + candidates[7:])
+
+
+@pytest.mark.parametrize("nonpattern,kept", [
+    (["90000", "000000", "000000", "90000"], False),
+    (["2500", "2500", "7500", "7500"], True),
+])
+def test_corroborated_texture_requires_adjacent_actual_numeric_readings(monkeypatch, nonpattern, kept):
+    # The native pattern helper has its own pixel regressions. Here its public
+    # evidence models a measured texture plus readings it cannot evaluate.
+    import stills_tool.text_states as tracker
+    def measured(source):
+        repeated = len(set(source["text"])) == 1
+        return {"available": repeated, "unlikely_repeated_glyphs": repeated,
+                "periodicity": 0.12 if repeated else 1,
+                "reason": "weak_nonperiodic_vertical_texture" if repeated else "not_a_repeated_character_reading"}
+    monkeypatch.setattr(tracker, "text_pattern_evidence", measured)
+    candidates = []
+    for index, text in enumerate(["00000", "00000"] + nonpattern):
+        candidates.append(candidate(index, index * 0.1, [
+            region("Complete headline", box=[300, 100, 420, 50]),
+            region(text, confidence=0.84, box=[100, 200, 30, 90]),
+        ]))
+    states = assign(candidates)
+    if kept:
+        assert any("2500" in state["text"] for state in states)
+        assert any("7500" in state["text"] for state in states)
+        assert all(item["text_ready"] for item in candidates[-4:])
+    else:
+        assert [state["text"] for state in states] == [["complete headline"]]
+        assert all(item["text_ready"] for item in candidates)
+
+
 def _native_reading(actual: str, observed: str) -> dict:
     image = np.full((180, 640, 3), 220, np.uint8)
     cv2.putText(image, actual, (120, 95), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (15, 15, 15), 3, cv2.LINE_AA)
     source = region(observed, box=[100, 45, 420, 80])
     source["complete_geometry"] = True
     return attach_text_appearance(image, [source])[0]
+
+
+def test_unchanged_track_does_not_need_native_pixel_comparisons(monkeypatch):
+    import stills_tool.text_states as tracker
+    def unnecessary_comparison(*args):
+        pytest.fail("Identical observed wording does not require OCR alias correction")
+    monkeypatch.setattr(tracker, "same_text_appearance", unnecessary_comparison)
+    candidates = [candidate(index, index * 0.1, [_native_reading("COMPLETE", "COMPLETE")])
+                  for index in range(4)]
+    states = assign(candidates)
+    assert [state["text"] for state in states] == [["complete"]]
+    assert all(item["text_ready"] for item in candidates)
+
+
+def test_weak_graphic_prefix_is_not_restored_after_native_alias_consensus():
+    readings = ["LOGO", "LOGO", "A LOGO", "A LOGO", "2 LOGO", "2 LOGO"]
+    candidates = []
+    for index, reading in enumerate(readings):
+        source = _native_reading("LOGO", reading)
+        source["recognition_characters"] = [
+            dict(item, confidence=0.70 if position == 0 and " " in reading else 0.99)
+            for position, item in enumerate(_characters(reading))
+        ]
+        source["recognition_details_match"] = True
+        candidates.append(candidate(index, index * 0.1, [source]))
+    states = assign(candidates)
+    assert [state["text"] for state in states] == [["logo"]]
+    assert all(item["text_contents"] == ["logo"] and item["text_ready"] for item in candidates)
+    assert candidates[-1]["vision"]["text"][0]["text"] == "2 LOGO"
 
 
 @pytest.mark.parametrize("first,alternative", [("C15:0", "C15:O"), ("C15:O", "C15:0"), ("$25", "$75")])
