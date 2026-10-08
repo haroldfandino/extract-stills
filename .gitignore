@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+release/
+validation/
+.pytest_cache/
+*.spec
+ffmpeg/
+models/*.task
+models/*.onnx
+stills/
+*.egg-info/
