@@ -1,0 +1,111 @@
+name: Native validation
+
+on:
+  push:
+    branches: [main, codex/v2.0]
+    paths-ignore: ["**.md"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Build and smoke-test native development bundles (no publishing)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: ${{ matrix.os }} / Python 3.12
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, macos-15]
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Install pinned Windows FFmpeg
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'ffmpeg-7.1.1-full_build.7z'
+          $expanded = Join-Path $env:RUNNER_TEMP 'extract-stills-ffmpeg'
+          Invoke-WebRequest 'https://github.com/GyanD/codexffmpeg/releases/download/7.1.1/ffmpeg-7.1.1-full_build.7z' -OutFile $archive
+          $expected = 'e5bbf665b9a43219d97a15c2dd2cdeb9b11bcb689d88a2177c4f754b4e20f793'
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'FFmpeg archive checksum mismatch' }
+          & 7z x $archive "-o$expanded" -y
+          if ($LASTEXITCODE -ne 0) { throw 'FFmpeg archive extraction failed' }
+          $source = Join-Path $expanded 'ffmpeg-7.1.1-full_build'
+          New-Item -ItemType Directory -Path ffmpeg -Force | Out-Null
+          Copy-Item -LiteralPath (Join-Path $source 'bin/ffmpeg.exe') -Destination ffmpeg
+          Copy-Item -LiteralPath (Join-Path $source 'bin/ffprobe.exe') -Destination ffmpeg
+          Copy-Item -LiteralPath (Join-Path $source 'LICENSE') -Destination ffmpeg
+          Copy-Item -LiteralPath (Join-Path $source 'README.txt') -Destination ffmpeg
+          (Resolve-Path ffmpeg).Path | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Build pinned Apple Silicon FFmpeg with color filters
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          test "$(uname -m)" = arm64
+          brew install pkg-config zimg little-cms2 x264
+          curl --fail --location https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz --output "$RUNNER_TEMP/ffmpeg-7.1.1.tar.xz"
+          printf '%s  %s\n' '733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1' "$RUNNER_TEMP/ffmpeg-7.1.1.tar.xz" | shasum -a 256 -c -
+          tar -xf "$RUNNER_TEMP/ffmpeg-7.1.1.tar.xz" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/ffmpeg-7.1.1"
+          export PKG_CONFIG_PATH="$(brew --prefix zimg)/lib/pkgconfig:$(brew --prefix little-cms2)/lib/pkgconfig:$(brew --prefix x264)/lib/pkgconfig"
+          export MACOSX_DEPLOYMENT_TARGET=13.0
+          ./configure --prefix="$GITHUB_WORKSPACE/ffmpeg" --disable-debug --disable-doc --disable-ffplay --disable-shared --enable-static --enable-gpl --enable-libx264 --enable-libzimg --enable-lcms2
+          make -j3
+          make install
+          cp LICENSE.md COPYING.* "$GITHUB_WORKSPACE/ffmpeg/"
+          printf '%s\n' 'FFmpeg 7.1.1 source: https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz' 'SHA256: 733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1' 'Build configuration is recorded in FFMPEG-BUILD.txt; external Homebrew library versions are runner-dependent.' > "$GITHUB_WORKSPACE/ffmpeg/SOURCE.txt"
+          echo "$GITHUB_WORKSPACE/ffmpeg/bin" >> "$GITHUB_PATH"
+      - name: Provision and verify pinned offline models
+        run: |
+          python scripts/setup_models.py
+          python scripts/setup_models.py --verify
+      - name: Source tests
+        run: python -m pytest -q
+      - name: GUI startup smoke test
+        run: python gui_entry.py --smoke-test
+      - name: Build native development bundles
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/codex/v2.0') || (github.event_name == 'workflow_dispatch' && inputs.package)
+        run: python build_app.py
+      - name: Verify frozen Windows applications
+        if: runner.os == 'Windows' && ((github.event_name == 'push' && github.ref == 'refs/heads/codex/v2.0') || (github.event_name == 'workflow_dispatch' && inputs.package))
+        run: python scripts/verify_packaged.py --cli "dist/cli/extract-stills/extract-stills.exe" --gui "dist/gui/Extract Stills/Extract Stills.exe" --result-json dist/packaged-verification.json
+      - name: Verify frozen Apple Silicon applications
+        if: runner.os == 'macOS' && ((github.event_name == 'push' && github.ref == 'refs/heads/codex/v2.0') || (github.event_name == 'workflow_dispatch' && inputs.package))
+        run: python scripts/verify_packaged.py --cli dist/cli/extract-stills/extract-stills --gui "dist/gui/Extract Stills.app/Contents/MacOS/Extract Stills" --result-json dist/packaged-verification.json
+      - name: Archive Windows development bundles
+        if: runner.os == 'Windows' && ((github.event_name == 'push' && github.ref == 'refs/heads/codex/v2.0') || (github.event_name == 'workflow_dispatch' && inputs.package))
+        shell: pwsh
+        run: Compress-Archive -LiteralPath dist/cli, dist/gui, dist/packaged-verification.json -DestinationPath dist/extract-stills-windows-x64-v2-beta.zip
+      - name: Archive Apple Silicon development bundles
+        if: runner.os == 'macOS' && ((github.event_name == 'push' && github.ref == 'refs/heads/codex/v2.0') || (github.event_name == 'workflow_dispatch' && inputs.package))
+        shell: bash
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent gui extract-stills-macos-arm64-v2-beta.zip
+          zip -r --symlinks extract-stills-macos-arm64-v2-beta.zip cli packaged-verification.json
+      - name: Save native development bundle artifact
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/codex/v2.0') || (github.event_name == 'workflow_dispatch' && inputs.package)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Extract-Stills-${{ matrix.os }}-V2-beta
+          path: dist/*-v2-beta.zip
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

@@ -1,0 +1,2 @@
+# The recognizer dictionary is a byte-verified upstream artifact.
+models/*.yml -text
