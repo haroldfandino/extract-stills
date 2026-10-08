@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "runtime_network_access": false,
+  "models": [
+    {
+      "id": "face_landmarker",
+      "name": "MediaPipe Face Landmarker",
+      "version": "float16/1",
+      "filename": "face_landmarker.task",
+      "url": "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+      "size_bytes": 3758596,
+      "sha256": "64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff",
+      "license": "Apache-2.0",
+      "source": "https://developers.google.com/edge/mediapipe/solutions/vision/face_landmarker#models",
+      "license_sources": [
+        "https://storage.googleapis.com/mediapipe-assets/MediaPipe%20BlazeFace%20Model%20Card%20%28Short%20Range%29.pdf",
+        "https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MediaPipe%20Face%20Mesh%20V2.pdf",
+        "https://storage.googleapis.com/mediapipe-assets/Model%20Card%20Blendshape%20V2.pdf"
+      ],
+      "runtime": "mediapipe==0.10.21; CPU",
+      "notes": "Google's versioned bundle contains face detection, landmarks and 52 expression blendshapes. Face confidence returned by this application is geometric reliability, not a detector probability."
+    },
+    {
+      "id": "text_detector",
+      "name": "PP-OCRv5 mobile text detector",
+      "version": "PP-OCRv5_mobile_det_onnx",
+      "revision": "e6f4fa85f00e168c862bc462aebca69eef9b3d3d",
+      "filename": "pp_ocrv5_mobile_det.onnx",
+      "url": "https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_det_onnx/resolve/e6f4fa85f00e168c862bc462aebca69eef9b3d3d/inference.onnx",
+      "size_bytes": 4826518,
+      "sha256": "a431985659dc921974177a95adcfbb90fd9e51989a5e04d70d0b75f597b6e61d",
+      "license": "Apache-2.0",
+      "source": "https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_det_onnx",
+      "license_sources": [
+        "https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_det_onnx/blob/e6f4fa85f00e168c862bc462aebca69eef9b3d3d/README.md",
+        "https://github.com/PaddlePaddle/PaddleOCR/blob/main/LICENSE"
+      ],
+      "configuration_source": "https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_det_onnx/blob/e6f4fa85f00e168c862bc462aebca69eef9b3d3d/inference.yml",
+      "runtime": "onnxruntime==1.23.2; CPUExecutionProvider",
+      "conversion": "None. This is PaddlePaddle's official, preconverted ONNX artifact.",
+      "preprocessing": {
+        "image_order": "BGR",
+        "resize_long": 960,
+        "multiple": 32,
+        "scale": 0.00392156862745098,
+        "mean": [0.485, 0.456, 0.406],
+        "std": [0.229, 0.224, 0.225]
+      },
+      "postprocessing": {
+        "binary_threshold": 0.3,
+        "box_threshold": 0.6,
+        "max_candidates": 1000,
+        "unclip_ratio": 1.5
+      },
+      "notes": "Detection only; no OCR language recognition, document unwarping or cloud APIs. DB quadrilateral expansion uses the rectangle's area/perimeter offset without additional polygon libraries."
+    }
+  ]
+}

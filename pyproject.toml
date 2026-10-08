@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "extract-stills"
+version = "2.0.0b1"
+description = "Offline, scene-aware still extraction with a desktop GUI and CLI"
+requires-python = ">=3.12,<3.13"
+license = "MIT"
+dependencies = [
+  "numpy==1.26.4",
+  "opencv-contrib-python==4.11.0.86",
+  "mediapipe==0.10.21",
+  "onnxruntime==1.23.2",
+  "scenedetect==0.6.7.1",
+  "PySide6==6.8.3",
+  "pillow==12.3.0",
+  "jax==0.4.35",
+  "jaxlib==0.4.35",
+  "protobuf==4.25.8",
+]
+
+[project.scripts]
+extract-stills = "stills_tool.cli:main"
+
+[project.gui-scripts]
+extract-stills-gui = "stills_tool.gui:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyinstaller>=6"]
+
+[tool.setuptools.packages.find]
+include = ["stills_tool*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
