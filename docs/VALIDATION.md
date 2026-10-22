@@ -1,52 +1,57 @@
-# V2 beta 3 validation
+# V2 beta 4 validation
 
-Validation date: October 8, 2026. Application source: 0e33ee5 on codex/v2.0. This is a development beta, not the stable V2 release.
+Validation date: October 22, 2026. Application source: adfb343 on codex/v2.0, version 2.0.0b4. This is a development beta. Main remains the V1 baseline. [Beta 3 evidence](VALIDATION-BETA3.md) records the earlier duration/wording coverage behavior; Beta 4 defaults to one still per detected shot.
 
-## Completed checks
+## Source and GUI checks
 
-- 213 engine, OCR, sharpness and integration tests passed on Windows x64 with Python 3.12 and locked dependencies.
-- 11 offscreen GUI tests passed, including automatic Smart defaults, review selection, light/dark themes, cancellation, safe shutdown and Legacy mode.
-- Native focus tests cover defocus, directional motion blur, noise, fine text, subject detail against busy backgrounds and rounded-score ties.
-- Text tests cover real one-word/digit changes, changing captions inside a continuous shot, typing/occlusion/scroll fragments, field-order jitter, repeated text and native color-pixel verification. Mixed-color and isoluminant text changes remain distinct; uncertain graphic tokens cannot silently erase supported numeric changes.
-- Real FFmpeg fixtures cover variable frame rates/nonzero PTS, rotation, source-frame identity, short shots, static holds, source integrity and legacy parity.
-- Export fixtures verify PNG/TIFF/JPEG bit depth, sRGB ICC profiles, source-color precision and HDR/PQ tone mapping.
-- Four local vision assets, including the Latin OCR model and its exact dictionary, are checksum-verified. Runtime never downloads models.
-- Replacement frozen Windows GUI/CLI checks pass from a temporary working directory with restricted PATH/proxy settings: PNG8/ICC, TIFF16/ICC, original resolution, offline asset lookup, GUI startup and the original Legacy worker. The frozen OCR fixture covers ALPHA/BRAVO/CLEAR with three readable states, automatic count growth from two to three and native text focus.
-- Native Windows x64 and Apple Silicon macOS 15 CI passed source, GUI startup, builds and frozen exports. Final application-source run: 37840694071. The current Mac bundle requires macOS 15 or newer.
+- 240 engine, shot detection, OCR, sharpness and integration tests passed on Windows x64 with Python 3.12 and locked dependencies. One optional face acceptance test was skipped because its older private video fixture is unavailable.
+- 13 offscreen GUI checks passed, covering automatic defaults, shot grouping, opening on the chosen candidate, manual selection/coverage, saved scene-schema compatibility, themes, cancellation, shutdown and Legacy mode.
+- 18 detector tests cover hard cuts, one/two-frame inserts, static branded canvases with portrait-inset cuts, same-palette edits, pans, zooms, subtitles, flashes, dissolves, fades, blank entrances/tails and bounded image history.
+- Integration tests verify repeated A/B/A shots retain separate stills, short inserts export, count caps report missing coverage, and low-quality shots receive explicit best-available fallbacks.
+- Ranking regressions cover blink/transition penalties surviving readability score caps, visible faces, settled UI frames beating scroll blur, native face/text focus and differing wording density.
+- Existing original-resolution, source-frame identity, VFR/nonzero PTS, rotation, PNG/TIFF/JPEG, bit-depth/ICC, source-color/HDR, source integrity and unchanged Legacy parity checks pass.
 
-## Supplied-video review
+## Six supplied advertisements
 
-Eight supplied Rec.709 SDR clips were analyzed at native resolution: HD and 4K, 15/30 seconds, 23.976 fps. Final consensus was replayed against lossless native color regions, enriched with character confidence, then scored, deduplicated and exported again. This reuses video analysis; the fresh frozen-app run below validates the final pipeline independently.
+All six supplied videos were analyzed locally with the frozen shot detector: two HD and four 4K clips at 23.976 fps, five approximately 30 seconds and one approximately 15 seconds. Each decoded source frame was screened; shortlisted frames were inspected at native resolution. Final ranking was replayed on those saved native measurements after visual review found score-cap and scroll-blur selection issues, then the chosen original source frames were exported again. This replay is not a fresh extraction benchmark. A fresh final frozen-application run is recorded separately below.
 
-The final replay produced 186 original-resolution PNG stills and covered all 165 eligible recognized wording occurrences. Every source SHA-256, size and modification time remained unchanged. Media, patches and outputs remain local and excluded from Git/CI. The initial complete eight-video analysis took 2,126.47 seconds; final replay/export took 609.41 CPU-process seconds across parallel jobs. These replay timings are not fresh extraction benchmarks.
+| Local fixture | Duration / resolution | Detected shots | Exported stills | Best-available shots flagged |
+| --- | --- | ---: | ---: | ---: |
+| A | 30 seconds / 4K | 15 | 15 | 0 |
+| B | 30 seconds / HD | 17 | 17 | 5 |
+| C | 30 seconds / HD | 18 | 18 | 2 |
+| D | 15 seconds / 4K | 6 | 6 | 0 |
+| E | 30 seconds / 4K | 11 | 11 | 2 |
+| F | 30 seconds / 4K | 10 | 10 | 0 |
+| Total | | 77 | 77 | 9 |
 
-| Fixture | Duration / resolution | Selected / automatic target | Eligible wording occurrences covered |
-| --- | --- | --- | --- |
-| A | 15 seconds / HD | 10 / 10 | 6 / 6 |
-| B | 30 seconds / HD | 23 / 23 | 22 / 22 |
-| C | 15 seconds / 4K | 17 / 17 | 14 / 14 |
-| D | 30 seconds / 4K | 32 / 32 | 28 / 28 |
-| E | 15 seconds / 4K | 15 / 15 | 13 / 13 |
-| F | 30 seconds / 4K | 44 / 44 | 41 / 41 |
-| G | 15 seconds / 4K | 19 / 19 | 17 / 17 |
-| H | 30 seconds / 4K | 26 / 26 | 24 / 24 |
+Every detected shot has exactly one selected frame. Source SHA-256, byte size and modification time remain unchanged. Source media, frame measurements, annotation files and exports stay local and excluded from Git/CI.
 
-Automatic count remains the default. Distinct readable wording can increase it beyond the duration base; an explicit count remains a cap. No export warnings or eligible-occurrence omissions were reported. Recognized eligibility is a heuristic estimate, not a human annotation of every visible word.
+Review labels were recorded from fixed timeline samples and dense frame sheets before comparison with detector output. All 44 initially marked definitive hard cuts match within one native source frame. Two additional detections were subsequently confirmed as real jump cuts by inspecting original-resolution frames; the annotations explicitly distinguish these post-detection adjudications from the initial blind reference set. A matching count alone was not used as proof of detection accuracy.
 
-Review rejected the occluded Trusted caption, a five-frame growing/exiting phrase and blouse lace misread as zeros. The final ending captions remain selected. Some small logos, punctuation/cursors, product microtext and clipped UI preview labels still produce conservative extra occurrences or uncertain readings. Strict editorial acceptance of all visible lettering needs human review; use Review before export and the reports for these cases. Motion/readability estimates and OCR confidence do not prove original opacity, spelling or semantic completeness.
+Strict annotated transition-window matches are 23 of 27. Two Birthday UI changes are found with boundaries two/three frames after the labeled transition interval. Hotel and Jam each keep a continuous story-to-memory UI scroll in the same detected shot. These are authored composition changes, with less objective shot semantics than physical camera edits. They remain useful targets for user feedback; this result does not claim frame-accurate parity with an editing application's detector.
 
-Local review gallery: validation/beta3_final/review.html. Machine-readable results: validation/beta3_final/summary.json. The replacement frozen Fatty15 30-second run is retained separately in validation/beta3_frozen_Fatty30_final.
+Visual review inspected the 77 initial selections and all 17 changed final recommendations. The final selections no longer show the identified blink, whole-frame scroll blur or incoming-overlay defects. Nine shots retain conservative quality/readability warnings; tiny text, intentional fades and partial faces still need judgment. Selection scores and OCR confidence do not certify every visible word or original text opacity.
 
-A fresh complete extraction through the final frozen Windows CLI passed in 343.14 seconds: 23 PNG images, automatic base 15/effective target 23, all 22 eligible recognized occurrences covered, final frame 704, no warnings and unchanged source SHA-256. It matches the replay selection count. The preceding build took 516.25 seconds on that clip; removing redundant unchanged-word comparisons improved this measured case.
+Final local review: `validation/beta4_review/review.html`. It shows every chosen still, clean transition endpoints, boundary evidence and links to the original-resolution exported PNGs; all 770 image/export links were checked. Reference comparisons are in `validation/beta4_review/summary.json`. Final analyses and exports are under `validation/beta4_final_ready`; initial fresh analyses are kept separately under `validation/shot_samples_beta4_final`.
 
-Reproduce fresh source extraction:
+Reproduce with source installation and local assets:
 
-    python scripts/validate_samples.py "D:/Filmkraft/Tools/Extract_stills/input" --output validation/beta3_fresh
+    python -m pytest -q
+    python tests/gui_smoke.py
+    python scripts/validate_samples.py "C:/Users/harol/Desktop/Extract-stills-test" --output validation/beta4_fresh
+    python scripts/validate_shots.py validation/beta4_fresh --compare --annotations validation/shot_review/manual_annotations.json --output validation/beta4_review_fresh
 
-## Native applications and stable-release gates
+The private annotation JSON is local validation evidence, not a repository test fixture. See [shot detection and human review](SHOT-DETECTION.md) to create independent annotations for other footage.
 
-Windows GUI: dist/beta3/gui/Extract Stills/Extract Stills.exe. Console: dist/beta3/cli/extract-stills/extract-stills.exe. Distribution: release/Extract-Stills-Windows-x64-V2-beta3.zip, with an adjacent SHA-256 file. Preserve the whole app folder. Prior beta artifacts are retained separately.
+## Native applications
 
-Beta 2 produced 103 stills across the same eight videos and passed native Windows/macOS 15 checks. Beta 3 adds more thorough native focus and wording analysis, so fresh processing takes longer. Temporary color-pixel evidence is released after selection to keep production analyses compact.
+Windows GUI: `dist/beta4/gui/Extract Stills/Extract Stills.exe`. Console: `dist/beta4/cli/extract-stills/extract-stills.exe`. Preserve the complete app folders. Earlier beta distributions remain separate.
 
-A restricted PATH/proxy smoke is not equivalent to disabling networking on a clean machine. Full offline clean-machine testing, macOS 13-compatible dependencies/native validation, signing/redistribution materials and user visual acceptance remain stable-release gates. Keep V2 separate from main; do not tag v2.0.0 or merge this draft yet.
+The final frozen Windows GUI/CLI passed synthetic checks from a temporary directory with restricted PATH and blocked proxy settings: bundled model hashes/notices, original-resolution PNG8/ICC and TIFF16/ICC, native text focus, three A/B/A shots with repeated pixels retained, no output-count increase for an in-shot caption change, GUI startup and the original Legacy worker. Application and bundled package metadata both report 2.0.0b4. Evidence: `validation/beta4_packaged-verification.json`.
+
+A fresh full extraction through that final frozen console passed on the 30-second HD advertisement in 152.31 seconds. It found 17 shots and exported 17 original-resolution stills, matching every selected source-frame ID in the reviewed replay. The corrected fallback frames retain open eyes/settled imagery, the saved analysis includes uncapped quality evidence, and the source fingerprint is unchanged. Evidence: `validation/beta4_frozen_Kids/verification.json`. This checks the complete final pipeline independently of the cached ranking replay.
+
+Distribution: `release/Extract-Stills-Windows-x64-V2-beta4.zip`, with an adjacent SHA-256 file. The archive contains complete GUI/CLI app folders, documentation and synthetic verification results; supplied acceptance media is excluded.
+
+The native CI workflow also validates Windows x64 and Apple Silicon macOS 15. Local Windows checks do not establish new Mac compatibility. The current dependency set requires macOS 15; macOS 13 compatibility remains a stable-release target. Keep V2 on its branch until visual acceptance and the existing native/offline/distribution release gates are complete.
