@@ -1,6 +1,6 @@
 # Extract Stills V2
 
-Offline shot detection and best-still selection for Windows x64 and Apple Silicon Macs. Smart extraction is the default: find the shots in a video and export one best still from each. The original every-24-frames extractor remains available as Legacy mode. V2 is a beta on the codex/v2.0 branch. Main contains the unchanged V1 baseline.
+Offline shot detection and best-still selection for Windows x64 and Apple Silicon Macs. V2 is the default implementation on `main`: Smart extraction finds the shots in a video and exports one best still from each. The original every-24-frames extractor remains available as Legacy mode and at the `v1.0.0` tag. The current packaged build is V2 Beta 4.
 
 The current Mac development bundle is tested on macOS 15 and contains dependencies requiring macOS 15. Support for macOS 13 remains a stable-release target; use the current Mac bundle on macOS 15 or newer.
 
@@ -87,4 +87,4 @@ Use a separate environment for the standalone V1 requirements to avoid installin
     python build_app.py
     python scripts/verify_packaged.py --help
 
-See [shot detection and review](docs/SHOT-DETECTION.md), [packaging instructions](docs/PACKAGING.md), [third-party notices](THIRD_PARTY_NOTICES.md), [validation evidence](docs/VALIDATION.md) and [approved plan](V2_PLAN.md). Native Mac builds must be validated on a Mac; Windows results do not establish Mac compatibility. V2 stays separate from main until validation and visual acceptance are complete.
+See [shot detection and review](docs/SHOT-DETECTION.md), [packaging instructions](docs/PACKAGING.md), [third-party notices](THIRD_PARTY_NOTICES.md), [validation evidence](docs/VALIDATION.md) and [original approved plan](V2_PLAN.md). Native Mac builds must be validated on a Mac; Windows results do not establish Mac compatibility.

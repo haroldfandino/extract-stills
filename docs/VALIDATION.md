@@ -1,6 +1,6 @@
 # V2 beta 4 validation
 
-Validation date: October 22, 2026. Application source: adfb343 on codex/v2.0, version 2.0.0b4. This is a development beta. Main remains the V1 baseline. [Beta 3 evidence](VALIDATION-BETA3.md) records the earlier duration/wording coverage behavior; Beta 4 defaults to one still per detected shot.
+Validation date: October 22, 2026. Validated application source: adfb343, version 2.0.0b4. V2 was promoted from codex/v2.0 to `main` at the user's request on October 22, 2026. The packaged build remains Beta 4; the unchanged V1 baseline is preserved at `v1.0.0` and through Legacy mode. [Beta 3 evidence](VALIDATION-BETA3.md) records the earlier duration/wording coverage behavior; Beta 4 defaults to one still per detected shot.
 
 ## Source and GUI checks
 
@@ -54,4 +54,4 @@ A fresh full extraction through that final frozen console passed on the 30-secon
 
 Distribution: `release/Extract-Stills-Windows-x64-V2-beta4.zip`, with an adjacent SHA-256 file. The archive contains complete GUI/CLI app folders, documentation and synthetic verification results; supplied acceptance media is excluded.
 
-The native CI workflow also validates Windows x64 and Apple Silicon macOS 15. Local Windows checks do not establish new Mac compatibility. The current dependency set requires macOS 15; macOS 13 compatibility remains a stable-release target. Keep V2 on its branch until visual acceptance and the existing native/offline/distribution release gates are complete.
+The native CI workflow also validates Windows x64 and Apple Silicon macOS 15. Source and packaged-application checks passed on both platforms for the validated application source before promotion to `main`. The current dependency set requires macOS 15; macOS 13 compatibility and the existing offline/distribution checks remain stable-release targets. Promoting V2 to `main` does not change the packaged version or create a stable release tag.

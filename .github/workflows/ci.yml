@@ -81,27 +81,27 @@ jobs:
       - name: GUI startup smoke test
         run: python gui_entry.py --smoke-test
       - name: Build native development bundles
-        if: (github.event_name == 'push' && github.ref == 'refs/heads/codex/v2.0') || (github.event_name == 'workflow_dispatch' && inputs.package)
+        if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/v2.0')) || (github.event_name == 'workflow_dispatch' && inputs.package)
         run: python build_app.py
       - name: Verify frozen Windows applications
-        if: runner.os == 'Windows' && ((github.event_name == 'push' && github.ref == 'refs/heads/codex/v2.0') || (github.event_name == 'workflow_dispatch' && inputs.package))
+        if: runner.os == 'Windows' && ((github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/v2.0')) || (github.event_name == 'workflow_dispatch' && inputs.package))
         run: python scripts/verify_packaged.py --cli "dist/cli/extract-stills/extract-stills.exe" --gui "dist/gui/Extract Stills/Extract Stills.exe" --result-json dist/packaged-verification.json
       - name: Verify frozen Apple Silicon applications
-        if: runner.os == 'macOS' && ((github.event_name == 'push' && github.ref == 'refs/heads/codex/v2.0') || (github.event_name == 'workflow_dispatch' && inputs.package))
+        if: runner.os == 'macOS' && ((github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/v2.0')) || (github.event_name == 'workflow_dispatch' && inputs.package))
         run: python scripts/verify_packaged.py --cli dist/cli/extract-stills/extract-stills --gui "dist/gui/Extract Stills.app/Contents/MacOS/Extract Stills" --result-json dist/packaged-verification.json
       - name: Archive Windows development bundles
-        if: runner.os == 'Windows' && ((github.event_name == 'push' && github.ref == 'refs/heads/codex/v2.0') || (github.event_name == 'workflow_dispatch' && inputs.package))
+        if: runner.os == 'Windows' && ((github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/v2.0')) || (github.event_name == 'workflow_dispatch' && inputs.package))
         shell: pwsh
         run: Compress-Archive -LiteralPath dist/cli, dist/gui, dist/packaged-verification.json -DestinationPath dist/extract-stills-windows-x64-v2-beta.zip
       - name: Archive Apple Silicon development bundles
-        if: runner.os == 'macOS' && ((github.event_name == 'push' && github.ref == 'refs/heads/codex/v2.0') || (github.event_name == 'workflow_dispatch' && inputs.package))
+        if: runner.os == 'macOS' && ((github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/v2.0')) || (github.event_name == 'workflow_dispatch' && inputs.package))
         shell: bash
         run: |
           cd dist
           ditto -c -k --sequesterRsrc --keepParent gui extract-stills-macos-arm64-v2-beta.zip
           zip -r --symlinks extract-stills-macos-arm64-v2-beta.zip cli packaged-verification.json
       - name: Save native development bundle artifact
-        if: (github.event_name == 'push' && github.ref == 'refs/heads/codex/v2.0') || (github.event_name == 'workflow_dispatch' && inputs.package)
+        if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/v2.0')) || (github.event_name == 'workflow_dispatch' && inputs.package)
         uses: actions/upload-artifact@v4
         with:
           name: Extract-Stills-${{ matrix.os }}-V2-beta
