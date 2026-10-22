@@ -41,6 +41,47 @@ def test_selected_readable_fallback_reports_its_wording_even_if_overall_quality_
     assert states[0]["selected_frame_id"] == 2
 
 
+def test_fallback_preserves_blink_and_transition_penalties_hidden_by_readability_cap():
+    blink = candidate(1, 0, 49, ready=False, eligible=False)
+    blink.update(quality_score=58)
+    blink["metrics"]["focus_quality"] = .67
+    clear = candidate(5, 0, 49, ready=False, eligible=False)
+    clear.update(quality_score=79)
+    clear["metrics"]["focus_quality"] = .65
+    assert core.select_shot_candidates([blink, clear], [{"id": 0}])[0] == [5]
+
+
+def test_settled_frame_beats_higher_score_from_scrolling_blur_without_ocr_words():
+    moving = candidate(185, 0, 85)
+    moving["selection_quality"] = {"soft": True}
+    settled = candidate(214, 0, 79)
+    settled["selection_quality"] = {"soft": False}
+    assert core.select_shot_candidates([moving, settled], [{"id": 0}])[0] == [214]
+
+
+def test_visible_open_face_beats_uncertain_face_with_slightly_higher_focus():
+    hidden = candidate(123, 0, 49, ready=False, eligible=False)
+    hidden.update(quality_score=78, selection_quality={"face_uncertain": True})
+    visible = candidate(136, 0, 49, ready=False, eligible=False)
+    visible.update(quality_score=75, selection_quality={"face_uncertain": False})
+    assert core.select_shot_candidates([hidden, visible], [{"id": 0}])[0] == [136]
+
+
+def test_scoring_and_selection_keep_open_eyes_when_both_wording_scores_are_capped():
+    from test_focus_integration import candidate as focus_candidate, face, SCENE, VIDEO
+    blink_face, open_face = face(), face()
+    blink_face["open_eyes"] = .4
+    open_face["open_eyes"] = .99
+    frames = [focus_candidate(10, {"scene": 20, "face": 9, "text": None, "noise": 0}, faces=[blink_face]),
+              focus_candidate(11, {"scene": 20, "face": 8, "text": None, "noise": 0}, faces=[open_face])]
+    for frame in frames:
+        frame["text_ready"] = False
+    core._score_candidates(frames, [SCENE], VIDEO)
+    assert [frame["score"] for frame in frames] == [49, 49]
+    assert frames[1]["quality_score"] > frames[0]["quality_score"]
+    assert core.select_shot_candidates(frames, [dict(SCENE)])[0] == [11]
+
+
 def test_count_is_a_cap_on_shots_with_explicit_missing_coverage():
     shots = [{"id": i} for i in range(5)]
     frames = [candidate(i * 24, i) for i in range(5)]

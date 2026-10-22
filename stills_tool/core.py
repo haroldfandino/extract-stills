@@ -521,12 +521,25 @@ def _score_candidates(candidates, scenes, video):
               if any(m.get(kind) is not None and m[kind] > 0 for m in values) else 1.0
               for kind in ("scene", "face", "text")}
         for key, values in native_references.items()}
+    shot_references = {}
+    for candidate in candidates:
+        focus = candidate["metrics"].get("native_focus")
+        if focus:
+            shot_references.setdefault(candidate["scene_id"], []).append(focus)
+    shot_references = {
+        key: {kind: float(np.median([m[kind] for m in values if m.get(kind) is not None and m[kind] > 0]))
+              if any(m.get(kind) is not None and m[kind] > 0 for m in values) else 1.0
+              for kind in ("face",)}
+        for key, values in shot_references.items()}
     for scene in scenes:
         group = [c for c in candidates if c["scene_id"] == scene["id"]]
         if not group:
             continue
         sharp_values = [c["metrics"]["sharpness"] for c in group]
         scale = max(4, float(np.percentile(sharp_values, 85)))
+        face_observations = sum(any(f.get("confidence", 0) >= .45
+                                    for f in c["vision"].get("faces", [])) for c in group)
+        expected_face = face_observations >= max(2, math.ceil(len(group) / 3))
         for position, candidate in enumerate(group):
             metrics, vision = candidate["metrics"], candidate["vision"]
             sharp = min(1, metrics["sharpness"] / scale)
@@ -545,7 +558,7 @@ def _score_candidates(candidates, scenes, video):
                              and not faces and not vision.get("text"))
             blank = metrics["contrast"] < 2 or uninformative
             transition = (min(candidate["frame_index"] - scene["start_frame"],
-                              scene["end_frame"] - candidate["frame_index"]) < 2 and len(group) > 3)
+                              scene["end_frame"] - candidate["frame_index"]) < 3 and len(group) > 3)
             next_shot = scenes[scene["id"] + 1] if scene["id"] + 1 < len(scenes) else {}
             mixed_until = scene.get("boundary", {}).get("end", scene["start_frame"] - 1)
             mixed_from = next_shot.get("boundary", {}).get("start", scene["end_frame"] + 1)
@@ -555,10 +568,13 @@ def _score_candidates(candidates, scenes, video):
             native = metrics.get("native_focus")
             if native:
                 reference = native_references[(candidate["scene_id"], candidate.get("text_state_id"))]
+                # Face quality is comparable across the shot. Lettering can
+                # also change density in the whole-image tiles.
+                shot_reference = shot_references[candidate["scene_id"]]
                 overall = relative_focus(native["scene"], reference["scene"])
                 subjects = []
                 if native.get("face") is not None:
-                    subjects.append(relative_focus(native["face"], reference["face"]))
+                    subjects.append(relative_focus(native["face"], shot_reference["face"]))
                 if native.get("text") is not None:
                     subjects.append(relative_focus(native["text"], reference["text"]))
                 detail = float(np.mean(subjects)) if subjects else overall
@@ -569,8 +585,23 @@ def _score_candidates(candidates, scenes, video):
             score -= exposure_penalty + (12 if transition else 0)
             if faces and eyes < 0.45:
                 score -= 18
+            # Missing facial evidence is not evidence of perfectly open eyes.
+            # Prefer a visible face when that subject recurs through this shot.
+            uncertain_face = expected_face and not faces
+            if uncertain_face:
+                score -= 8
+            clear_subject = bool(native and faces and native.get("face") is not None and
+                                 native["face"] >= shot_references[candidate["scene_id"]]["face"] * 1.15)
+            candidate["selection_quality"] = {
+                "mixed": bool(mixed), "transition": bool(transition),
+                "soft": bool(sharp < .45 and not clear_subject),
+                "blink": bool(faces and eyes < .65), "face_uncertain": bool(uncertain_face),
+                "text_moving": bool(stable < .7 and vision.get("text"))}
             if blank:
                 score = 0
+            # Eligibility caps must not erase the blink, transition and focus
+            # differences needed to rank a shot's best-available fallbacks.
+            candidate["quality_score"] = round(max(0, min(100, score)), 5)
             if severe_softness:
                 score = min(score, 49)
             if candidate.get("text_ready") is False:
@@ -585,6 +616,8 @@ def _score_candidates(candidates, scenes, video):
                 candidate["reasons"].append("Soft compared with other frames in this shot")
             if faces and eyes < 0.65:
                 candidate["reasons"].append("Possible blink or closed eyes")
+            if uncertain_face:
+                candidate["reasons"].append("Face visibility is uncertain in this frame")
             if stable < 0.7 and vision.get("text"):
                 candidate["reasons"].append("Text may still be moving or fading")
             if transition:
@@ -700,6 +733,16 @@ def _candidate_rank(candidate):
     return candidate["score"], candidate.get("metrics", {}).get("focus_quality", 0) or 0
 
 
+def _preferred_shot_pool(group):
+    """Choose settled, visible subjects before comparing small score differences."""
+    pool = group
+    for flag in ("mixed", "transition", "soft", "blink", "face_uncertain", "text_moving"):
+        stronger = [c for c in pool if not c.get("selection_quality", {}).get(flag, False)]
+        if stronger:
+            pool = stronger
+    return pool
+
+
 def select_shot_candidates(candidates, shots, count=None):
     """One representative for each physical shot, including repeated footage.
 
@@ -715,8 +758,13 @@ def select_shot_candidates(candidates, shots, count=None):
         good = [c for c in group if c["eligible"] and c.get("text_ready", True)]
         def fallback_rank(candidate):
             blank = "Blank or fading frame" in candidate.get("reasons", [])
-            return not blank, candidate.get("text_ready", True), *_candidate_rank(candidate)
-        best = max(good, key=_candidate_rank) if good else max(group, key=fallback_rank)
+            return (not blank, candidate.get("text_ready", True),
+                    candidate.get("quality_score", candidate["score"]), *_candidate_rank(candidate))
+        fallback = [c for c in group if "Blank or fading frame" not in c.get("reasons", [])] or group
+        readable = [c for c in fallback if c.get("text_ready", True)]
+        fallback = readable or fallback
+        best = (max(_preferred_shot_pool(good), key=_candidate_rank) if good else
+                max(_preferred_shot_pool(fallback), key=fallback_rank))
         shot["selection_status"] = "recommended" if good else "fallback"
         shot["selected_frame_id"] = best["id"]
         if not good:
