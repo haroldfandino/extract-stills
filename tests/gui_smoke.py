@@ -63,10 +63,10 @@ def make_analysis(directory: Path, name: str = "Campaign_30_HD_Social_H264.mp4")
         (144, 6.0, 1, 64.8, "Mid", ["Small expression change", "Moderate sharpness"]),
         (168, 7.0, 1, 91.7, "High", ["Stable ending", "Strong text contrast"]),
     ]
-    for index, timestamp, scene, score, tier, reasons in rows:
+    for index, timestamp, shot, score, tier, reasons in rows:
         filename = f"frame_{index}.png"
         pixmap = QPixmap(640, 360)
-        pixmap.fill(QColor("#246e71" if scene == 0 else "#273753"))
+        pixmap.fill(QColor("#246e71" if shot == 0 else "#273753"))
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setPen(Qt.NoPen)
@@ -81,13 +81,13 @@ def make_analysis(directory: Path, name: str = "Campaign_30_HD_Social_H264.mp4")
         painter.drawArc(305, 139, 32, 20, 190 * 16, 160 * 16)
         painter.setPen(QColor("#ffffff"))
         painter.setFont(QFont("Segoe UI", 28, QFont.Bold))
-        painter.drawText(25, 48, "A moment worth keeping" if scene == 0 else "MAKE IT MATTER")
+        painter.drawText(25, 48, "A moment worth keeping" if shot == 0 else "MAKE IT MATTER")
         painter.setFont(QFont("Segoe UI", 15))
         painter.drawText(27, 328, "Campaign film · smoke fixture")
         painter.end()
         assert pixmap.save(str(previews / filename))
         candidates.append({
-            "id": index, "frame_index": index, "timestamp": timestamp, "scene_id": scene,
+            "id": index, "frame_index": index, "timestamp": timestamp, "shot_id": shot,
             "score": score, "tier": tier, "reasons": reasons,
             "metrics": {"sharpness": score / 100, "text_stability": 0.95},
             "preview": filename, "eligible": index != 0, "duplicate_of": None,
@@ -95,10 +95,10 @@ def make_analysis(directory: Path, name: str = "Campaign_30_HD_Social_H264.mp4")
     return {
         "source": str(source), "analysis_dir": str(previews),
         "video": {"duration": 8.0, "width": 1920, "height": 1080},
-        "scenes": [{"id": 0, "start": 0.0, "end": 5.0}, {"id": 1, "start": 5.0, "end": 8.0}],
+        "shots": [{"id": 0, "start": 0.0, "end": 5.0}, {"id": 1, "start": 5.0, "end": 8.0}],
         "candidates": candidates, "selected_ids": [48, 168], "end_card_id": 168,
-        "target": 3, "base_target": 3,
-        "warnings": ["Selected 2 distinct frames; the target was 3."],
+        "target": 2, "base_target": 2, "selection_profile": "one_per_shot",
+        "warnings": [],
     }
 
 
@@ -134,6 +134,8 @@ class GuiSmokeTests(unittest.TestCase):
         defaults.validate()
         self.assertEqual((defaults.mode, defaults.format, defaults.bit_depth, defaults.color), ("smart", "png", 8, "srgb"))
         self.assertIsNone(defaults.count)
+        self.assertIn("every detected shot", self.window.count_auto.toolTip())
+        self.assertIn("one best still", self.window.mode_note.text())
         self.assertFalse(self.window.review_checkbox.isChecked())
         self.window.count_auto.setChecked(False)
         self.window.count_spin.setValue(17)
@@ -218,20 +220,20 @@ class GuiSmokeTests(unittest.TestCase):
         self.window._clear_inputs()
         self.assertFalse(self.window.run_button.isEnabled())
 
-    def test_scene_pages_retain_selections_and_allow_manual_candidates(self):
+    def test_shot_pages_retain_selections_and_allow_manual_candidates(self):
         analysis = copy.deepcopy(self.analysis)
         base = analysis["candidates"][0]
         analysis["candidates"] = [
-            dict(base, id=index * 24, frame_index=index * 24, timestamp=float(index), scene_id=0)
+            dict(base, id=index * 24, frame_index=index * 24, timestamp=float(index), shot_id=0)
             for index in range(25)
         ]
-        analysis["scenes"] = [{"id": 0, "start": 0.0, "end": 25.0}]
+        analysis["shots"] = [{"id": 0, "start": 0.0, "end": 25.0}]
         analysis["selected_ids"] = [0, 576]
         self.window._clear_results()
         card = gui.VideoReviewCard(analysis)
         self.window.results_layout.addWidget(card)
         APP.processEvents()
-        group = card.findChild(gui.SceneCandidateGroup)
+        group = card.findChild(gui.ShotCandidateGroup)
         self.assertEqual(group.grid.count(), 12)
         first = group.grid.itemAt(0).widget()
         self.assertFalse(first.thumbnail.icon().isNull())
@@ -258,6 +260,40 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertFalse(preview.pixmap.isNull())
         self.assertGreater(preview.image.pixmap().width(), 0)
         preview.close()
+
+    def test_shot_review_opens_on_chosen_still_and_updates_coverage(self):
+        analysis = copy.deepcopy(self.analysis)
+        base = analysis["candidates"][0]
+        analysis["candidates"] = [
+            dict(base, id=index, frame_index=index, timestamp=float(index), shot_id=0)
+            for index in range(25)
+        ]
+        analysis["shots"] = [{"id": 0, "start": 0.0, "end": 25.0}]
+        analysis["selected_ids"] = [24]
+        card = gui.VideoReviewCard(analysis)
+        self.window.results_layout.addWidget(card)
+        group = card.findChild(gui.ShotCandidateGroup)
+        self.assertEqual(group.page, 2)
+        self.assertEqual(group.grid.itemAt(0).widget().candidate["id"], 24)
+        self.assertIn("Selected", group.chosen_label.text())
+        self.assertIn("1 of 1 shot covered", card.summary.text())
+        card.clear_selection()
+        self.assertEqual(group.chosen_label.text(), "No still selected")
+        self.assertIn("0 of 1 shot covered", card.summary.text())
+        card.restore_selection()
+        self.assertIn("Selected", group.chosen_label.text())
+
+    def test_earlier_scene_analysis_remains_reviewable_as_shots(self):
+        analysis = copy.deepcopy(self.analysis)
+        analysis["scenes"] = analysis.pop("shots")
+        analysis.pop("selection_profile")
+        for candidate in analysis["candidates"]:
+            candidate["scene_id"] = candidate.pop("shot_id")
+        card = gui.VideoReviewCard(analysis)
+        self.window.results_layout.addWidget(card)
+        self.assertEqual(len(card.findChildren(gui.ShotCandidateGroup)), 2)
+        self.assertIn("2 of 2 shots covered", card.summary.text())
+        self.assertEqual(card.selected_ids(), [48, 168])
 
     def test_background_batch_continues_after_failure_and_auto_exports(self):
         good = self.analysis["source"]
@@ -353,7 +389,7 @@ def save_visuals() -> None:
         directory = Path(temporary)
         analysis = make_analysis(directory)
         for item in analysis["candidates"]:
-            item["text_contents"] = ["A moment worth keeping" if item["scene_id"] == 0 else "Make it matter"]
+            item["text_contents"] = ["A moment worth keeping" if item["shot_id"] == 0 else "Make it matter"]
             item["text_ready"] = item["id"] != 0
             item["text_reason"] = "Text is still entering" if item["id"] == 0 else "Repeated readable observed wording"
         settings = QSettings(str(directory / "settings.ini"), QSettings.IniFormat)

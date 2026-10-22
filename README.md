@@ -1,6 +1,6 @@
 # Extract Stills V2
 
-Offline, scene-aware still selection for Windows x64 and Apple Silicon Macs. Smart extraction is the default; the original every-24-frames extractor remains available as Legacy mode. V2 is a beta on the codex/v2.0 branch. Main contains the unchanged V1 baseline.
+Offline shot detection and best-still selection for Windows x64 and Apple Silicon Macs. Smart extraction is the default: find the shots in a video and export one best still from each. The original every-24-frames extractor remains available as Legacy mode. V2 is a beta on the codex/v2.0 branch. Main contains the unchanged V1 baseline.
 
 The current Mac development bundle is tested on macOS 15 and contains dependencies requiring macOS 15. Support for macOS 13 remains a stable-release target; use the current Mac bundle on macOS 15 or newer.
 
@@ -10,17 +10,19 @@ Windows: open **Extract Stills.exe** in the complete GUI distribution folder. ma
 
 Drop video files or folders, choose Smart or Legacy, and run. Smart defaults to original-resolution 8-bit PNG in sRGB. Folder scans are nonrecursive unless enabled. Each source gets a separate run folder beside it under stills, or under the chosen output root.
 
-Enable **Review before export** to choose scored candidates yourself. Thumbnails are grouped by scene; click a preview for a larger view. Low/Mid/High scores describe local sharpness, text stability, exposure and facial-expression signals. Recognized wording and Words ready/incomplete cues help review animated or cropped text. Reports are optional.
+Enable **Review before export** to choose scored candidates yourself. Thumbnails are grouped by shot, with the chosen still's timestamp shown in each group; each group opens on its recommended candidate. Click a preview for a larger view. Low/Mid/High scores describe local sharpness, text stability, exposure and facial-expression signals. Recognized wording and Words ready/incomplete cues help review animated or cropped text. Reports are optional.
 
-Smart favors open eyes with a small smile bonus, settled titles and scene coverage. It targets 6/10/15/20 stills for 6/15/30/over-30-second videos, interpolates between anchors, and increases the automatic count for distinct scenes and complete readable wording occurrences. Automatic counts remain the default. Quality shortfalls produce fewer stills and an explanation. Count override is a maximum; reports explain any wording occurrences excluded by that cap.
+**Automatic** remains the default. Its count is the number of detected shots: one recommended still per shot, including a shot that returns to earlier imagery. Smart favors sharp detail, open eyes, settled titles and complete text when choosing within each shot. Duration and text changes do not add extra stills. A manual count is a maximum; a limit below the number of shots leaves some shots out. Manual review can choose additional frames or replace the recommendation.
 
-Focus ranking combines multiple native-pixel scales, noise correction and edge acutance. It checks original-resolution face/text regions and scene tiles, then searches wider native-frame neighborhoods around promising moments. Continuous rankings distinguish sharp candidates that previously received the same score; distant weaker frames cannot pad a run solely for temporal variety.
+When every candidate in a shot has a quality issue, Smart selects the best available still and flags that shot for review, so a difficult shot does not disappear from the output.
 
-Local Latin-script OCR identifies changed words even inside a continuous shot. Native regional detection repairs fragmented word crops and long fine print; temporal consensus waits for complete, unclipped, readable wording instead of brief typing/scroll fragments. Per-character confidence distinguishes uncertain marks from strong words. Native color-pixel checks help resolve OCR fluctuations while preserving real letter, digit and colored-text changes. The same wording can recur later, while a repeated identical image is exported once and linked to both occurrences. OCR confidence and completeness are evidence-based estimates, not guarantees of spelling or original opacity.
+Focus ranking combines multiple native-pixel scales, noise correction and edge acutance. It checks original-resolution face/text regions and shot tiles, then searches native-frame neighborhoods around promising moments. Continuous rankings distinguish sharp candidates that previously received the same score.
 
-Smart analysis takes longer than the earlier beta because it inspects more original-resolution moments and reads their text locally. Temporary pixel evidence is released after selection; saved analyses retain the decisions and diagnostics needed for review and export.
+Local Latin-script OCR helps rank frames with complete, unclipped, readable wording within each shot. Native regional detection repairs fragmented word crops and long fine print; temporal consensus recognizes brief typing/scroll fragments. Per-character confidence distinguishes uncertain marks from strong words. Native color-pixel checks help resolve OCR fluctuations while preserving real letter, digit and colored-text changes. Text changes within a continuous shot remain review evidence and do not increase the automatic count. OCR confidence and completeness are evidence-based estimates, not guarantees of spelling or original opacity.
 
-The ending selection is a stable frame near the end of the last usable shot. Text stability is an estimate from video pixels, not a measurement of original text opacity. Detection is heuristic; serious expressions and unreliable or tiny faces are treated appropriately rather than requiring a smile.
+Smart screens every decoded frame, then checks shortlisted original-resolution moments and reads their text locally. Processing time depends on resolution, shot count and text complexity. Temporary pixel evidence is released after selection; saved analyses retain the decisions and diagnostics needed for review and export.
+
+The final shot gets one representative like every other shot, exported in shot order. Text stability is an estimate from video pixels, not a measurement of original text opacity. Detection is heuristic; serious expressions and unreliable or tiny faces are treated appropriately rather than requiring a smile.
 
 ## Source installation
 
@@ -53,7 +55,7 @@ The console distribution has its own extract-stills executable and models. Conso
 
 Alternatively use **python -m stills_tool** with the same arguments. Passing a video directly is shorthand for extract.
 
-Frame IDs are zero-based source frame indexes, including in reports and explicit selections. Original timestamps are retained for variable frame rates. Analyze writes analysis.json and candidate previews; export validates the original video fingerprint before using that analysis. Re-exporting creates another run folder.
+Frame IDs are zero-based source frame indexes, including in reports and explicit selections. Original timestamps are retained for variable frame rates. Analyze writes analysis.json and candidate previews; export validates the original video fingerprint before using that analysis. New analyses use shots and shot_id. Earlier analyses containing scenes and scene_id remain available for review and export. Re-exporting creates another run folder.
 
 JSON stdout contains version, status, results and errors; diagnostics/progress go to stderr. Batches continue after individual errors. Exit status is 0 on success, 1 for processing failures, and 2 for argument syntax errors.
 
@@ -64,8 +66,8 @@ JSON stdout contains version, status, results and errors; diagnostics/progress g
 - Source color requires 16-bit PNG/TIFF, preserves source transfer/gamut and writes a color metadata sidecar. Use a color-aware workflow for HDR source-color images.
 - Output pixels come directly from the source, never from JPEG analysis previews. Converting an 8-bit source into a 16-bit file does not restore missing source precision.
 - Missing color tags are assumed Rec.709 SDR and reported.
-- Manifest includes frame IDs, timestamps, scores, source/output color and actual selection count.
-- Optional scores.html, scores.json and scores.csv include all scored candidates, native focus evidence, recognized wording, text readiness, occurrence coverage, reasons and duplicate decisions. Keep previews with the HTML report.
+- Manifest includes frame IDs, timestamps, scores, shot IDs, source/output color and actual selection count.
+- Optional scores.html, scores.json and scores.csv include all scored candidates, native focus evidence, recognized wording, text readiness, shot coverage, reasons and duplicate decisions. The HTML report groups candidates by shot and shows selected stills first. Keep previews with the HTML report.
 
 ## Legacy compatibility
 
@@ -85,4 +87,4 @@ Use a separate environment for the standalone V1 requirements to avoid installin
     python build_app.py
     python scripts/verify_packaged.py --help
 
-See [packaging instructions](docs/PACKAGING.md), [third-party notices](THIRD_PARTY_NOTICES.md), [validation evidence](docs/VALIDATION.md) and [approved plan](V2_PLAN.md). Native Mac builds must be validated on a Mac; Windows results do not establish Mac compatibility. V2 stays separate from main until validation and visual acceptance are complete.
+See [shot detection and review](docs/SHOT-DETECTION.md), [packaging instructions](docs/PACKAGING.md), [third-party notices](THIRD_PARTY_NOTICES.md), [validation evidence](docs/VALIDATION.md) and [approved plan](V2_PLAN.md). Native Mac builds must be validated on a Mac; Windows results do not establish Mac compatibility. V2 stays separate from main until validation and visual acceptance are complete.

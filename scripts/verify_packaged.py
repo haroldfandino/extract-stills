@@ -109,21 +109,25 @@ def validate_assets(resources: Path) -> None:
 
 
 def make_word_fixture(ffmpeg: Path, cwd: Path, env: dict[str, str]) -> tuple[Path, list[str]]:
-    """Generate three captions without fonts installed by the OS or drawtext.
+    """Generate A/B/A shots and one in-shot caption change without OS fonts.
 
     Pillow's pinned, embedded TrueType default font creates source fixture pixels
     on the verification host. Recognition itself runs only in the frozen app.
     """
     from PIL import Image, ImageDraw, ImageFont
 
-    expected = ["alpha", "bravo", "clear"]
+    expected = ["alpha", "bravo", "clear", "alpha"]
     font = ImageFont.load_default(size=48)
     frames = []
-    for word in expected:
-        image = Image.new("RGB", (960, 540), (55, 55, 55))
+    for index, word in enumerate(expected):
+        # BRAVO -> CLEAR changes only a caption inside the same camera view.
+        # The final ALPHA shot is pixel-identical to the opening ALPHA shot;
+        # global image deduplication must not erase its editorial occurrence.
+        background = (100, 30, 35) if index in (0, 3) else (20, 90, 130)
+        image = Image.new("RGB", (960, 540), background)
         draw = ImageDraw.Draw(image)
         draw.text((120, 225), word.upper(), font=font, fill=(250, 250, 250))
-        frames.append(image.tobytes() * 10)
+        frames.append(image.tobytes() * 24)
     source = cwd / "changed-captions.mkv"
     result = subprocess.run([
         str(ffmpeg), "-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
@@ -144,28 +148,46 @@ def verify_word_states(cli: Path, ffmpeg: Path, cwd: Path, env: dict[str, str]) 
     observed = [[str(word).casefold() for word in state["text"]] for state in states]
     if observed != [[word] for word in expected]:
         raise ValueError(f"Frozen OCR did not retain every complete changed caption: {observed!r}")
+    shots = analysis.get("shots", [])
+    if len(shots) != 3 or analysis.get("selection_profile") != "one_per_shot":
+        raise ValueError(f"Frozen shot detection did not find the A/B/A edit: {len(shots)} shots.")
+    if [(shot["start_frame"], shot["end_frame"]) for shot in shots] != [(0, 23), (24, 71), (72, 95)]:
+        raise ValueError("Frozen shot boundaries do not match the two source cuts at frames 24 and 72.")
     exported = {entry["frame_index"]: entry for entry in extracted["files"]}
     candidates = {entry["id"]: entry for entry in analysis["candidates"]}
-    for state, word in zip(states, expected):
-        selected = state["selected_frame_id"]
-        if selected not in exported or not exported[selected]["text_ready"]:
-            raise ValueError(f"Frozen selection did not export a readable representative for {word}.")
-        if [str(value).casefold() for value in exported[selected]["recognized_text"]] != [word]:
-            raise ValueError(f"Exported recognized wording does not match {word}.")
-        if state["id"] not in exported[selected]["text_state_ids"]:
-            raise ValueError(f"Exported caption coverage metadata is incomplete for {word}.")
+    if len(extracted["files"]) != 3 or len(exported) != 3 or analysis["target"] != 3:
+        raise ValueError("Automatic extraction must export one still per shot, without adding a still for an in-shot text change.")
+    if [entry.get("shot_id") for entry in extracted["files"]] != [0, 1, 2]:
+        raise ValueError("Exported stills do not cover all three shots in editorial order.")
+    allowed = [{"alpha"}, {"bravo", "clear"}, {"alpha"}]
+    recognized = []
+    for selected, entry in exported.items():
         candidate = candidates[selected]
+        shot_id = candidate.get("shot_id")
+        reading = [str(value).casefold() for value in entry["recognized_text"]]
+        if not entry["text_ready"] or len(reading) != 1 or reading[0] not in allowed[shot_id]:
+            raise ValueError(f"Frozen selection did not export complete readable wording for shot {shot_id + 1}: {reading!r}.")
+        if not any(state["id"] in entry["text_state_ids"] and state["selected_frame_id"] == selected
+                   for state in states if [str(value).casefold() for value in state["text"]] == reading):
+            raise ValueError(f"Exported caption metadata is incomplete for shot {shot_id + 1}.")
+        recognized.append(reading[0])
         focus = candidate["metrics"].get("native_focus", {})
         text_focus = focus.get("text")
         if focus.get("measurement") != "native source pixels" or not isinstance(text_focus, (int, float)) or not math.isfinite(text_focus) or text_focus <= 0:
-            raise ValueError(f"Frozen native sharpness analysis has no positive text-region focus evidence for {word}.")
-    if analysis["base_target"] != 2 or len(exported) != 3 or analysis["target"] < 3:
-        raise ValueError("Automatic count did not grow from the duration target to preserve three changed captions.")
+            raise ValueError(f"Frozen native sharpness analysis has no positive text-region focus evidence for shot {shot_id + 1}.")
+    from PIL import Image
+    first, last = Path(extracted["files"][0]["path"]), Path(extracted["files"][2]["path"])
+    with Image.open(first) as image, Image.open(last) as repeated:
+        if first == last or image.size != repeated.size or image.tobytes() != repeated.tobytes():
+            raise ValueError("Repeated A shots must each retain a separate, identical-pixel still.")
     if digest(source) != before:
         raise ValueError("Caption extraction modified the synthetic source.")
-    return {"recognized_captions": expected, "text_states": len(states), "exported_captions": len(exported),
-            "base_target": analysis["base_target"], "target": analysis["target"],
-            "complete_wording_coverage": True, "native_text_focus_verified": True}
+    return {"recognized_captions": expected, "selected_captions": recognized,
+            "text_states": len(states), "exported_captions": len(exported),
+            "shot_count": len(shots), "target": analysis["target"],
+            "one_per_shot_verified": True, "in_shot_text_change_does_not_expand_count": True,
+            "repeated_shot_retained": True, "selected_wording_complete": True,
+            "native_text_focus_verified": True}
 
 
 def macos_audit(executables: list[Path]) -> dict:

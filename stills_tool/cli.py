@@ -17,7 +17,7 @@ def _settings(parser, inputs=True, mode=False, count=False):
     if mode:
         parser.add_argument("--mode", choices=["smart", "legacy"], default="smart")
     if count:
-        parser.add_argument("--count", type=int, help="Maximum count; automatic count grows for scene coverage")
+        parser.add_argument("--count", type=int, help="Maximum stills; default selects one best still per detected shot")
     parser.add_argument("--output", type=Path, help="Output root; default: stills beside each source")
     parser.add_argument("--format", choices=["png", "tiff", "jpeg"], default="png")
     parser.add_argument("--bit-depth", type=int, choices=[8, 16], default=8)
@@ -34,10 +34,10 @@ def main(argv=None):
         return 0
     if argv and argv[0] not in {"extract", "analyze", "export", "gui", "--version", "-h", "--help"}:
         argv.insert(0, "extract")
-    parser = argparse.ArgumentParser(prog="extract-stills", description="Offline scene-aware still extraction")
+    parser = argparse.ArgumentParser(prog="extract-stills", description="Offline shot detection and best-still extraction")
     parser.add_argument("--version", action="version", version=__version__)
     commands = parser.add_subparsers(dest="command", required=True)
-    _settings(commands.add_parser("extract", help="Analyze and export automatically"), mode=True, count=True)
+    _settings(commands.add_parser("extract", help="Find shots and export one best still from each"), mode=True, count=True)
     _settings(commands.add_parser("analyze", help="Save candidate analysis without final exports"), count=True)
     exporter = commands.add_parser("export", help="Export an analysis using explicit source-frame IDs")
     exporter.add_argument("analysis", type=Path, help="analysis.json or its containing directory")
@@ -82,7 +82,8 @@ def main(argv=None):
                         analysis = analyze_video(path, options, progress)
                         result = ({"source": analysis["source"], "analysis_dir": analysis["analysis_dir"],
                                    "analysis": str(Path(analysis["analysis_dir"]) / "analysis.json"),
-                                   "target": analysis["target"], "selected_ids": analysis["selected_ids"],
+                                   "target": analysis["target"], "shot_count": len(analysis.get("shots", analysis.get("scenes", []))),
+                                   "selected_ids": analysis["selected_ids"],
                                    "warnings": analysis["warnings"]} if args.command == "analyze" else
                                   export_analysis(analysis, options, progress=progress))
                     results.append(result)

@@ -389,7 +389,7 @@ class CandidateCard(QFrame):
             reasons.append(f"Similar to frame {int(candidate['duplicate_of'])}")
         if not candidate.get("eligible", True):
             reasons.append("Outside automatic selection")
-        note = _label(" · ".join(reasons[:2])[:135] or "Candidate for this scene", "Muted")
+        note = _label(" · ".join(reasons[:2])[:135] or "Candidate for this shot", "Muted")
         note.setWordWrap(True)
         note.setToolTip("\n".join(reasons))
         layout.addWidget(note)
@@ -426,27 +426,39 @@ class CandidateCard(QFrame):
         PreviewDialog(self.analysis, self.candidate, self).exec()
 
 
-class SceneCandidateGroup(QWidget):
-    """Page large scenes so long videos do not allocate every thumbnail widget."""
+def _analysis_shots(analysis: dict) -> list[dict]:
+    """Read current analyses and saved analyses from the earlier scene schema."""
+    return analysis.get("shots", analysis.get("scenes", []))
+
+
+def _candidate_shot_id(candidate: dict) -> int:
+    return candidate.get("shot_id", candidate.get("scene_id", 0))
+
+
+class ShotCandidateGroup(QWidget):
+    """Page shot candidates and open on the recommended still."""
 
     PAGE_SIZE = 12
 
-    def __init__(self, owner: "VideoReviewCard", scene: dict, candidates: list[dict]):
+    def __init__(self, owner: "VideoReviewCard", shot: dict, candidates: list[dict]):
         super().__init__(owner)
         self.owner = owner
-        self.scene = scene
+        self.shot = shot
         self.candidates = sorted(candidates, key=lambda item: (item["timestamp"], item["frame_index"]))
-        self.page = 0
+        chosen = next((index for index, item in enumerate(self.candidates) if item["id"] in owner.selection), 0)
+        self.page = chosen // self.PAGE_SIZE
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
         heading = QHBoxLayout()
         heading.addWidget(_label(
-            f"Scene {int(scene['id']) + 1:02}  ·  "
-            f"{time_label(scene.get('start', 0))} – {time_label(scene.get('end', 0))}",
+            f"Shot {int(shot['id']) + 1:02}  ·  "
+            f"{time_label(shot.get('start', 0))} – {time_label(shot.get('end', 0))}",
             "CardTitle",
         ))
         heading.addStretch(1)
+        self.chosen_label = _label("", "Muted")
+        heading.addWidget(self.chosen_label)
         self.page_label = _label("", "Muted")
         heading.addWidget(self.page_label)
         self.previous = _button("Previous")
@@ -464,6 +476,15 @@ class SceneCandidateGroup(QWidget):
             self.grid.setColumnStretch(column, 1)
         layout.addLayout(self.grid)
         self._render_page()
+
+    def update_selection_summary(self) -> None:
+        chosen = [item for item in self.candidates if item["id"] in self.owner.selection]
+        if len(chosen) == 1:
+            self.chosen_label.setText(f"Selected {time_label(chosen[0]['timestamp'])}")
+        elif chosen:
+            self.chosen_label.setText(f"{len(chosen)} selected")
+        else:
+            self.chosen_label.setText("No still selected")
 
     def _change_page(self, delta: int) -> None:
         last = max(0, (len(self.candidates) - 1) // self.PAGE_SIZE)
@@ -486,6 +507,7 @@ class SceneCandidateGroup(QWidget):
         self.page_label.setText(f"{start + 1}–{stop} of {len(self.candidates)} candidates")
         self.previous.setEnabled(self.page > 0)
         self.next.setEnabled(stop < len(self.candidates))
+        self.update_selection_summary()
         self.owner.apply_busy_to_candidates()
 
 
@@ -564,14 +586,14 @@ class VideoReviewCard(QFrame):
         self._details_built = True
         grouped: dict[int, list[dict]] = {}
         for candidate in self.analysis.get("candidates", []):
-            grouped.setdefault(candidate["scene_id"], []).append(candidate)
-        scenes = {scene["id"]: scene for scene in self.analysis.get("scenes", [])}
-        for scene_id in sorted(grouped):
-            candidates = grouped[scene_id]
-            scene = scenes.get(scene_id, {
-                "id": scene_id, "start": candidates[0]["timestamp"], "end": candidates[-1]["timestamp"],
+            grouped.setdefault(_candidate_shot_id(candidate), []).append(candidate)
+        shots = {shot["id"]: shot for shot in _analysis_shots(self.analysis)}
+        for shot_id in sorted(grouped):
+            candidates = grouped[shot_id]
+            shot = shots.get(shot_id, {
+                "id": shot_id, "start": candidates[0]["timestamp"], "end": candidates[-1]["timestamp"],
             })
-            self.details_layout.addWidget(SceneCandidateGroup(self, scene, candidates))
+            self.details_layout.addWidget(ShotCandidateGroup(self, shot, candidates))
         if not grouped:
             self.details_layout.addWidget(_label("No candidates were available for this video.", "Warning"))
 
@@ -586,13 +608,14 @@ class VideoReviewCard(QFrame):
         self._update_summary()
 
     def _update_summary(self) -> None:
-        summary = (
-            f"{len(self.selection)} selected  ·  target {self.analysis.get('target', 0)}  ·  "
-            f"{len(self.analysis.get('scenes', []))} scenes"
+        covered = {_candidate_shot_id(item) for item in self.analysis.get("candidates", [])
+                   if item["id"] in self.selection}
+        total = len(_analysis_shots(self.analysis))
+        self.summary.setText(
+            f"{len(self.selection)} selected  ·  {len(covered)} of {total} {'shot' if total == 1 else 'shots'} covered"
         )
-        if self.analysis.get("text_states"):
-            summary += f"  ·  {len(self.analysis['text_states'])} wording moments"
-        self.summary.setText(summary)
+        for group in self.findChildren(ShotCandidateGroup):
+            group.update_selection_summary()
         self.export_button.setEnabled(bool(self.selection) and not self.busy)
 
     def set_selected(self, candidate_id: int, selected: bool) -> None:
@@ -765,7 +788,7 @@ class MainWindow(QMainWindow):
         title = QVBoxLayout()
         title.setSpacing(3)
         title.addWidget(_label("Extract Stills", "Title"))
-        title.addWidget(_label("Find clear, distinct moments in your videos", "Subtitle"))
+        title.addWidget(_label("One best still from every shot", "Subtitle"))
         header.addLayout(title, 1)
         header.addWidget(_label("V2.0", "Muted"), alignment=Qt.AlignTop)
         self.theme_button = _button("Dark")
@@ -822,12 +845,12 @@ class MainWindow(QMainWindow):
         self.mode_combo.currentIndexChanged.connect(self._update_options)
         self.count_auto = QCheckBox("Automatic")
         self.count_auto.setChecked(True)
-        self.count_auto.setToolTip("Choose a duration-based target and cover worthwhile, distinct scenes")
+        self.count_auto.setToolTip("Choose one best still from every detected shot; the number of shots sets the count")
         self.count_auto.toggled.connect(self._update_options)
         self.count_spin = QSpinBox()
         self.count_spin.setRange(1, 9999)
         self.count_spin.setValue(10)
-        self.count_spin.setToolTip("Limit smart extraction to this many stills")
+        self.count_spin.setToolTip("Maximum stills; a limit below the number of shots leaves some shots out")
         count_widget = QWidget()
         count_layout = QHBoxLayout(count_widget)
         count_layout.setContentsMargins(0, 0, 0, 0)
@@ -960,7 +983,7 @@ class MainWindow(QMainWindow):
         self.count_spin.setEnabled(smart and not self._busy and not self.count_auto.isChecked())
         self.depth_combo.setEnabled(smart and not self._busy and self.format_combo.currentData() != "jpeg")
         self.mode_note.setText(
-            "Automatic selection balances clarity, scene coverage and variety. The ending frame is exported last."
+            "Automatic: one best still from every detected shot, ranked for clarity, complete text and open eyes."
             if smart else
             "Legacy: every 24th frame plus the literal last frame, original PNG names, saved in the adjacent stills folder."
         )
@@ -1081,7 +1104,7 @@ class MainWindow(QMainWindow):
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
         description = _label(
-            "Add videos to find clear frames from each scene.\n"
+            "Add videos to choose the best still from every shot.\n"
             "Turn on Review before export to inspect and choose your moments.",
             "Muted",
         )

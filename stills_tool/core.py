@@ -20,10 +20,10 @@ import time
 
 import cv2
 import numpy as np
-from scenedetect.detectors import AdaptiveDetector, ContentDetector
 
 from .types import CancelledError, Options
 from .sharpness import measure_focus
+from .shots import ShotDetector
 
 EXTENSIONS = {".mp4", ".mov", ".mxf", ".mkv", ".avi", ".m4v", ".webm"}
 CREATE_FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -227,13 +227,9 @@ def _decode_scan(source, video, directory, progress, cancel):
     scale = min(1.0, 960 / max(video["width"], video["height"]))
     width = max(2, int(video["width"] * scale) // 2 * 2)
     height = max(2, int(video["height"] * scale) // 2 * 2)
-    detector = AdaptiveDetector(adaptive_threshold=2.0, min_content_val=3.0,
-                                min_scene_len=max(2, round(video["fps"] * 0.15)))
-    # Graphic ads often change only a portion of the image. Supplement adaptive
-    # cuts with conservative absolute content cuts, separated by 0.4 seconds.
-    content_detector = ContentDetector(threshold=8.0, min_scene_len=max(2, round(video["fps"] * 0.4)))
+    detector = ShotDetector(video["fps"])
     filter_value = color_filter(video) + f",scale={width}:{height},format=bgr24"
-    cuts, records, buckets = [], [], {}
+    cuts, records = [], []
     preview_dir = directory / "previews"
     preview_dir.mkdir()
     error_file = tempfile.TemporaryFile()
@@ -242,10 +238,6 @@ def _decode_scan(source, video, directory, progress, cancel):
                                 "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=error_file,
                                creationflags=CREATE_FLAGS)
-    retained = set()
-    previous_gray = None
-    keep_following = -1
-    last_change_time = -10.0
     try:
         size = width * height * 3
         for index, timing in enumerate(video["frames"]):
@@ -261,40 +253,8 @@ def _decode_scan(source, video, directory, progress, cancel):
             metrics = _cheap_metrics(image)
             records.append(metrics)
             cuts.extend(detector.process_frame(index, image))
-            cuts.extend(content_detector.process_frame(index, image))
-            bucket = int(timing["timestamp"] * 4)
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            if previous_gray is not None:
-                difference = cv2.absdiff(gray, previous_gray)
-                block_h, block_w = height // 16 * 16, width // 16 * 16
-                blocks = difference[:block_h, :block_w].reshape(block_h // 16, 16, block_w // 16, 16)
-                localized_change = (bool(block_h and block_w) and difference.mean() < 1.8
-                                    and blocks.mean(axis=(1, 3)).max() > 10)
-                if localized_change and timing["timestamp"] - last_change_time >= 0.10:
-                    last_change_time = timing["timestamp"]
-                    keep_following = index + 2
-            if index <= keep_following:
-                retained.add(index)
-                _write_preview(preview_dir / f"frame_{index:08d}.jpg", image)
-            previous_gray = gray
-            entry = buckets.get(bucket)
-            if entry is None:
-                buckets[bucket] = {"first": index, "best": index, "focus": metrics["screen_focus"],
-                                   "events": set()}
-                retained.add(index)
-                _write_preview(preview_dir / f"frame_{index:08d}.jpg", image)
-            elif metrics["screen_focus"] > entry["focus"]:
-                old = entry["best"]
-                if old != entry["first"] and old not in entry["events"]:
-                    retained.discard(old)
-                    (preview_dir / f"frame_{old:08d}.jpg").unlink(missing_ok=True)
-                entry.update(best=index, focus=metrics["screen_focus"])
-                retained.add(index)
-                _write_preview(preview_dir / f"frame_{index:08d}.jpg", image)
-            if index <= keep_following:
-                buckets[bucket]["events"].add(index)
             if index % 24 == 0:
-                _progress(progress, "Scanning scenes", index + 1, video["frame_count"])
+                _progress(progress, "Scanning shots", index + 1, video["frame_count"])
         if process.stdout.read(1):
             raise RuntimeError("Decoder produced more frames than FFprobe reported.")
         process.wait()
@@ -308,7 +268,9 @@ def _decode_scan(source, video, directory, progress, cancel):
             process.wait()
         process.stdout.close()
         error_file.close()
-    boundaries = sorted({0, video["frame_count"], *(int(x) for x in cuts)})
+    cuts.extend(detector.finish(video["frame_count"]))
+    boundaries = sorted({0, video["frame_count"], *(int(x) for x in cuts
+                                                  if 0 < x < video["frame_count"])})
     scenes = []
     for scene_id, (start, end) in enumerate(zip(boundaries, boundaries[1:])):
         if end <= start:
@@ -316,10 +278,45 @@ def _decode_scan(source, video, directory, progress, cancel):
         scenes.append({"id": scene_id, "start_frame": start, "end_frame": end - 1,
                        "start": video["frames"][start]["timestamp"],
                        "end": video["frames"][end - 1]["timestamp"] + video["frames"][end - 1]["duration"]})
-        best = max(range(start, end), key=lambda i: records[i]["screen_focus"])
-        retained.add(best)
-    _progress(progress, "Scanning scenes", video["frame_count"], video["frame_count"])
-    return sorted(retained), records, scenes, (width, height)
+        scenes[-1]["boundary"] = next((dict(d) for d in detector.diagnostics
+                                               if d["frame"] == start and d.get("accepted", True)),
+                                              {"frame": start, "kind": "start", "confidence": 1.0})
+    _progress(progress, "Scanning shots", video["frame_count"], video["frame_count"])
+    return _shot_shortlist(records, scenes, video), records, scenes, (width, height)
+
+
+def _shot_shortlist(records, shots, video):
+    """Screen every source frame, retaining diverse sharp moments within each shot.
+
+    Native face/text analysis follows this inexpensive pass. Equal time bins keep
+    a sharp static logo from filling the entire shortlist with adjacent frames.
+    """
+    retained = set()
+    for position, shot in enumerate(shots):
+        start, end = shot["start_frame"], shot["end_frame"]
+        length = end - start + 1
+        if length <= 12:
+            retained.update(range(start, end + 1))
+            continue
+        margin = min(2, (length - 1) // 4)
+        first, last = start + margin, end - margin
+        settled_start = shot.get("boundary", {}).get("end", start - 1) + 1
+        next_boundary = shots[position + 1].get("boundary", {}) if position + 1 < len(shots) else {}
+        settled_end = next_boundary.get("start", end + 1) - 1
+        if settled_start <= settled_end:
+            first, last = max(first, settled_start), min(last, settled_end)
+        if last < first:
+            first = last = (start + end) // 2
+        bins = min(24, max(8, math.ceil((shot["end"] - shot["start"]) * 3)))
+        edges = np.linspace(first, last + 1, min(bins, last - first + 1) + 1).astype(int)
+        def rank(index, centre):
+            metrics = records[index]
+            useful = metrics["contrast"] >= 2 and metrics["edge_fraction"] >= .0002
+            return useful, metrics["screen_focus"], -abs(index - centre)
+        for left, right in zip(edges, edges[1:]):
+            retained.add(max(range(left, right), key=lambda i: rank(i, (left + right - 1) / 2)))
+        retained.add((first + last) // 2)
+    return sorted(retained)
 
 
 def _source_frames(source, video, indexes, directory, cancel=None):
@@ -435,6 +432,7 @@ def _analyze_native_candidates(source, video, indexes, records, scenes, size, di
                                "timestamp": video["frames"][index]["timestamp"],
                                "pts": video["frames"][index]["pts"],
                                "scene_id": bisect.bisect_right(starts, index) - 1,
+                               "shot_id": bisect.bisect_right(starts, index) - 1,
                                "preview": preview, "metrics": {**records[index], "native_focus": focus},
                                "vision": detection})
             _progress(progress, "Checking native sharpness and words", number + 1, len(indexes))
@@ -548,6 +546,11 @@ def _score_candidates(candidates, scenes, video):
             blank = metrics["contrast"] < 2 or uninformative
             transition = (min(candidate["frame_index"] - scene["start_frame"],
                               scene["end_frame"] - candidate["frame_index"]) < 2 and len(group) > 3)
+            next_shot = scenes[scene["id"] + 1] if scene["id"] + 1 < len(scenes) else {}
+            mixed_until = scene.get("boundary", {}).get("end", scene["start_frame"] - 1)
+            mixed_from = next_shot.get("boundary", {}).get("start", scene["end_frame"] + 1)
+            mixed = candidate["frame_index"] <= mixed_until or candidate["frame_index"] >= mixed_from
+            transition = transition or mixed
             score = 40 + 28 * sharp + 12 * region + 12 * stable + 8 * eyes + 2 * smile
             native = metrics.get("native_focus")
             if native:
@@ -572,18 +575,22 @@ def _score_candidates(candidates, scenes, video):
                 score = min(score, 49)
             if candidate.get("text_ready") is False:
                 score = min(score, 49)
+            if mixed:
+                score = min(score, 49)
             candidate["score"] = round(max(0, min(100, score)), 2)
             candidate["tier"] = "High" if score >= 75 else "Mid" if score >= 50 else "Low"
             candidate["eligible"] = score >= 50 and not blank
             candidate["reasons"] = []
             if sharp < 0.45:
-                candidate["reasons"].append("Soft compared with other frames in this scene")
+                candidate["reasons"].append("Soft compared with other frames in this shot")
             if faces and eyes < 0.65:
                 candidate["reasons"].append("Possible blink or closed eyes")
             if stable < 0.7 and vision.get("text"):
                 candidate["reasons"].append("Text may still be moving or fading")
             if transition:
-                candidate["reasons"].append("Near a scene transition")
+                candidate["reasons"].append("Near a shot transition")
+            if mixed:
+                candidate["reasons"].append("Inside an animated shot transition")
             if blank:
                 candidate["reasons"].append("Blank or fading frame")
             if severe_softness and not blank:
@@ -616,7 +623,7 @@ def _score_candidates(candidates, scenes, video):
                 candidate["eligible"] = False
                 candidate["score"] = min(candidate["score"], 49)
                 candidate["tier"] = "Low"
-                candidate["reasons"].append("Unsettled transition between sharper scenes")
+                candidate["reasons"].append("Unsettled transition between sharper shots")
 
 
 def _near_match(first, second):
@@ -693,7 +700,49 @@ def _candidate_rank(candidate):
     return candidate["score"], candidate.get("metrics", {}).get("focus_quality", 0) or 0
 
 
+def select_shot_candidates(candidates, shots, count=None):
+    """One representative for each physical shot, including repeated footage.
+
+    Quality gates guide selection rather than erasing a detected shot. When no
+    frame clears them the best available frame remains reviewable as a fallback.
+    An explicit count is a cap on shot coverage, never a padding quota.
+    """
+    representatives = []
+    for shot in shots:
+        group = [c for c in candidates if c.get("shot_id", c.get("scene_id")) == shot["id"]]
+        if not group:
+            raise RuntimeError(f"Shot {shot['id'] + 1} has no analyzed frames.")
+        good = [c for c in group if c["eligible"] and c.get("text_ready", True)]
+        def fallback_rank(candidate):
+            blank = "Blank or fading frame" in candidate.get("reasons", [])
+            return not blank, candidate.get("text_ready", True), *_candidate_rank(candidate)
+        best = max(good, key=_candidate_rank) if good else max(group, key=fallback_rank)
+        shot["selection_status"] = "recommended" if good else "fallback"
+        shot["selected_frame_id"] = best["id"]
+        if not good:
+            best["reasons"].append("Best available frame for this shot; review recommended")
+        representatives.append(best["id"])
+    target = min(count, len(shots)) if count is not None else len(shots)
+    if len(representatives) > target:
+        positions = ([len(shots) - 1] if target == 1 else
+                     np.linspace(0, len(shots) - 1, target).round().astype(int))
+        representatives = [representatives[i] for i in positions]
+    selected = set(representatives)
+    for shot in shots:
+        if shot["selected_frame_id"] not in selected:
+            shot.update(selected_frame_id=None, selection_status="omitted_count_limit")
+    return sorted(representatives), target
+
+
+def _shot_coverage(candidates, shots, selected):
+    chosen = set(selected)
+    covered = sorted({c.get("shot_id", c.get("scene_id", 0)) for c in candidates if c["id"] in chosen})
+    return {"shot_count": len(shots), "covered_shot_ids": covered,
+            "missing_shot_ids": [s["id"] for s in shots if s["id"] not in covered]}
+
+
 def select_candidates(candidates, scenes, base_target, count=None, end_id=None):
+    """Compatibility selector for saved scene/word-coverage integrations."""
     pool = [c for c in candidates if c["eligible"] and c.get("text_ready", True)
             and c["duplicate_of"] is None]
     if any(c.get("text_state_id") is not None for c in pool):
@@ -796,7 +845,9 @@ def _record_text_coverage(candidates, text_states, selected):
         state["covered_by_duplicate"] = False
         for index in state["candidate_ids"]:
             candidate = by_id[index]
-            if not candidate["eligible"] or not candidate.get("text_ready", True):
+            if not candidate.get("text_ready", True):
+                continue
+            if index not in selected and not candidate["eligible"]:
                 continue
             duplicate = candidate.get("duplicate_of")
             target = index if duplicate is None else duplicate
@@ -830,30 +881,25 @@ def analyze_video(path, options=None, progress=None, cancel=None):
                 source, video, indexes, records, scenes, size, directory, vision, progress, cancel)
             text_states = assign_text_states(candidates, scenes, analysis_video)
             _score_candidates(candidates, scenes, {**video, "width": size[0], "height": size[1]})
-            # Revisit a wider native-rate neighborhood around two diverse
-            # leading moments per scene and every readable wording occurrence.
+            # Revisit source-rate neighborhoods around two diverse leading
+            # moments in each shot. Wording changes guide quality, not count.
             existing = {c["id"] for c in candidates}
             refine = set()
             anchors = []
             for scene in scenes:
-                group = [c for c in candidates if c["scene_id"] == scene["id"] and c["eligible"]]
+                group = [c for c in candidates if c["scene_id"] == scene["id"]]
                 if group:
-                    best = max(group, key=_candidate_rank)
+                    best = max(group, key=lambda c: (c.get("text_ready", True), *_candidate_rank(c)))
                     anchors.append(best)
-                    distant = [c for c in group if abs(c["timestamp"] - best["timestamp"]) >= 0.6]
+                    separation = min(.6, (scene["end"] - scene["start"]) / 3)
+                    distant = [c for c in group if abs(c["timestamp"] - best["timestamp"]) >= separation]
                     if distant:
-                        anchors.append(max(distant, key=_candidate_rank))
-            for state in text_states:
-                group = [c for c in candidates if c.get("text_state_id") == state["id"]]
-                if group:
-                    anchors.append(max(group, key=lambda c: (c["text_ready"], *_candidate_rank(c))))
-            # Unsupported brief readings need a second native observation.
-            anchors += [c for c in candidates if c.get("text_contents") and c.get("text_state_id") is None]
+                        anchors.append(max(distant, key=lambda c: (c.get("text_ready", True), *_candidate_rank(c))))
             for candidate in anchors:
                 scene = scenes[candidate["scene_id"]]
                 index = candidate["id"]
-                start_time = candidate["timestamp"] - 0.25
-                end_time = candidate["timestamp"] + 0.25
+                start_time = candidate["timestamp"] - 0.16
+                end_time = candidate["timestamp"] + 0.16
                 neighborhood = [i for i in range(max(scene["start_frame"], index - math.ceil(video["fps"] * .4)),
                                                  min(scene["end_frame"], index + math.ceil(video["fps"] * .4)) + 1)
                                 if start_time <= video["frames"][i]["timestamp"] <= end_time]
@@ -867,42 +913,30 @@ def analyze_video(path, options=None, progress=None, cancel=None):
         finally:
             vision.close()
             clear_text_appearance_cache()
-        end_id = None
-        for scene in reversed(scenes):
-            group = [c for c in candidates if c["scene_id"] == scene["id"] and c["eligible"]]
-            if group:
-                latest = max(c["timestamp"] for c in group)
-                group = [c for c in group if c["timestamp"] >= latest - min(3, scene["end"] - scene["start"])]
-                terminal = max(group, key=lambda c: c["timestamp"])
-                terminal_state = terminal.get("text_state_id")
-                if terminal_state is not None:
-                    group = [c for c in group if c.get("text_state_id") == terminal_state]
-                settled = [c for c in group if c["metrics"]["text_stability"] >= 0.8]
-                end_id = max(settled or group, key=_candidate_rank)["id"]
-                break
-        if end_id is None:
-            warnings.append("No suitable stable ending frame was found.")
-        _deduplicate(candidates, source, video, directory, end_id, progress, cancel)
-        base = duration_target(video["duration"], video["fps"])
-        selected, target = select_candidates(candidates, scenes, base, options.count, end_id)
+        # A repeated camera shot later in the edit still needs its own still.
+        # Global pixel deduplication would erase that shot's coverage.
+        for candidate in candidates:
+            candidate["duplicate_of"] = None
+        base = len(scenes)
+        selected, target = select_shot_candidates(candidates, scenes, options.count)
+        end_id = scenes[-1]["selected_frame_id"] if scenes else None
         _record_text_coverage(candidates, text_states, selected)
         # Native lossless patches are transient temporal evidence. Export and
         # review use the recorded wording decisions and original source frames;
         # retain compact diagnostics without bloating saved analyses with pixels.
         release_text_appearance(candidates)
-        missed_states = [s["id"] for s in text_states if s["selected_frame_id"] is None and
-                         any(c.get("text_state_id") == s["id"] and c["eligible"] for c in candidates)]
-        if missed_states:
-            warnings.append(f"{len(missed_states)} readable text occurrences were not selected"
-                            + (" because of the explicit count limit." if options.count is not None else
-                               " after duplicate verification; see the candidate report."))
-        if len(selected) < target:
-            warnings.append(f"Selected {len(selected)} distinct eligible frames; target was {target}.")
-        analysis = {"schema_version": 1, "scoring_version": "2.0-b3",
+        fallback = [s["id"] + 1 for s in scenes if s["selection_status"] == "fallback"]
+        if fallback:
+            warnings.append("Best-available frames need review in shots: " + ", ".join(map(str, fallback)) + ".")
+        if target < base:
+            warnings.append(f"Explicit count limit covers {target} of {base} detected shots.")
+        analysis = {"schema_version": 2, "scoring_version": "2.0-b4",
+                    "selection_profile": "one_per_shot", "shots": scenes,
                     "source": str(source), "source_fingerprint": identity, "video": video,
                     "analysis_dir": str(directory), "scenes": scenes, "candidates": candidates,
                     "selected_ids": selected, "end_card_id": end_id, "text_states": text_states,
-                    "base_target": base, "target": target, "warnings": warnings}
+                    "base_target": base, "target": target, "warnings": warnings,
+                    **_shot_coverage(candidates, scenes, selected)}
         (directory / "analysis.json").write_text(json.dumps(analysis, indent=2), encoding="utf-8")
         if options.report:
             from .reports import write_reports
@@ -1008,13 +1042,18 @@ def export_analysis(analysis, options=None, frame_ids=None, progress=None, cance
             destination = directory / f"{source.stem}_still_{number:03d}_frame_{index:08d}.{extension}"
             temporary_map[index].rename(destination)
             files.append({"frame_index": index, "timestamp": candidates[index]["timestamp"],
+                          "shot_id": candidates[index].get("shot_id", candidates[index].get("scene_id", 0)),
                           "path": str(destination), "score": candidates[index]["score"],
                           "recognized_text": candidates[index].get("text_contents", []),
                           "text_ready": candidates[index].get("text_ready", True),
                           "text_state_ids": [s["id"] for s in coverage
                                              if s.get("selected_frame_id") == index]})
         warnings = [w for w in analysis["warnings"] if not w.startswith("Selected ")]
-        if len(files) < analysis["target"]:
+        shots = analysis.get("shots", analysis.get("scenes", []))
+        shot_coverage = _shot_coverage(analysis["candidates"], shots, order)
+        if analysis.get("selection_profile") == "one_per_shot" and shot_coverage["missing_shot_ids"]:
+            warnings.append(f"This export covers {len(shot_coverage['covered_shot_ids'])} of {len(shots)} detected shots.")
+        elif len(files) < analysis["target"]:
             warnings.append(f"Selected {len(files)} distinct eligible frames; target was {analysis['target']}.")
         result = {"schema_version": 1, "status": "success", "source": str(source),
                   "output_dir": str(directory), "files": files, "selected_count": len(files),
@@ -1028,6 +1067,9 @@ def export_analysis(analysis, options=None, frame_ids=None, progress=None, cance
                                    "transfer": video.get("color_transfer"), "range": "full"},
                   "analysis": str(Path(analysis["analysis_dir"]) / "analysis.json")}
         result["text_states"] = coverage
+        result.update(shot_coverage)
+        if analysis.get("selection_profile") == "one_per_shot":
+            result.update(schema_version=2, selection_profile="one_per_shot")
         (directory / "manifest.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
         if options.color == "source":
             (directory / "color_metadata.json").write_text(

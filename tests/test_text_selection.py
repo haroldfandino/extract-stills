@@ -178,37 +178,37 @@ def assert_export_pixels(result: dict, images: list[np.ndarray]) -> None:
         np.testing.assert_allclose(image, images[source_index], atol=1)
 
 
-def test_real_native_ocr_three_short_titles_exceed_duration_base_count(tmp_path):
+def test_real_native_ocr_word_changes_do_not_add_shots(tmp_path):
     source, images = make_real_word_video(tmp_path, ("ALPHA", "BRAVO", "CLEAR"))
     analysis = core.analyze_video(source, Options(output=tmp_path / "output"))
     assert len(analysis["scenes"]) == 1, "Wording changes must be covered inside one continuous shot"
-    assert analysis["base_target"] == 2
+    assert analysis["base_target"] == 1
     assert [state["text"] for state in analysis["text_states"]] == [["alpha"], ["bravo"], ["clear"]]
-    assert len(analysis["selected_ids"]) == analysis["target"] == 3
+    assert len(analysis["selected_ids"]) == analysis["target"] == 1
+    assert analysis["selection_profile"] == "one_per_shot"
     stored = json.loads((Path(analysis["analysis_dir"]) / "analysis.json").read_text())
     appearances = [region["appearance"] for candidate in stored["candidates"]
                    for region in candidate["vision"]["text"] if "appearance" in region]
     assert appearances and all("data" not in evidence for evidence in appearances)
     result = core.export_analysis(analysis, Options(report=True))
-    assert result["selected_count"] == 3
-    assert {tuple(file["recognized_text"]) for file in result["files"]} == {("alpha",), ("bravo",), ("clear",)}
+    assert result["selected_count"] == 1
+    assert tuple(result["files"][0]["recognized_text"]) in {("alpha",), ("bravo",), ("clear",)}
     assert all(file["text_ready"] for file in result["files"])
-    assert result["files"][-1]["recognized_text"] == ["clear"], "The ending still must retain the final complete wording"
+    assert result["covered_shot_ids"] == [0] and result["missing_shot_ids"] == []
     assert_export_pixels(result, images)
 
 
-def test_real_native_ocr_repeated_title_reuses_exact_pixels_and_reports_coverage(tmp_path):
+def test_real_native_ocr_repeated_in_shot_title_remains_one_still(tmp_path):
     source, images = make_real_word_video(tmp_path, ("ALPHA", "BRAVO", "ALPHA"))
     analysis = core.analyze_video(source, Options(output=tmp_path / "output"))
     assert [state["text"] for state in analysis["text_states"]] == [["alpha"], ["bravo"], ["alpha"]]
     result = core.export_analysis(analysis, Options(report=True))
-    assert result["selected_count"] == 2
+    assert result["selected_count"] == 1
     pixels = [cv2.imread(file["path"], cv2.IMREAD_UNCHANGED) for file in result["files"]]
-    assert len({hashlib.sha256(image.tobytes()).hexdigest() for image in pixels}) == 2
-    assert {state for file in result["files"] for state in file["text_state_ids"]} == {0, 1, 2}
-    assert all(state["selected_frame_id"] is not None for state in analysis["text_states"])
-    assert any(state["covered_by_duplicate"] for state in analysis["text_states"])
+    assert len({hashlib.sha256(image.tobytes()).hexdigest() for image in pixels}) == 1
+    assert any(state["selected_frame_id"] is not None for state in analysis["text_states"])
+    assert not any(state["covered_by_duplicate"] for state in analysis["text_states"])
     scores = json.loads((Path(result["output_dir"]) / "scores.json").read_text())
     assert len(scores["text_states"]) == 3
-    assert all(state["selected_frame_id"] is not None for state in scores["text_states"])
+    assert scores["shot_count"] == 1 and scores["covered_shot_ids"] == [0]
     assert_export_pixels(result, images)

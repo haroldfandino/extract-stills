@@ -31,7 +31,9 @@ def main():
             if fingerprint(path) != before:
                 raise RuntimeError("Source identity changed.")
             record = {"video": path.name, "status": "success", "selected": result["selected_count"],
-                      "target": result["target"], "scenes": len(analysis["scenes"]),
+                      "target": result["target"], "shots": len(analysis["shots"]),
+                      "covered_shot_ids": result["covered_shot_ids"],
+                      "missing_shot_ids": result["missing_shot_ids"],
                       "base_target": analysis["base_target"],
                       "end_card_time": next(c["timestamp"] for c in analysis["candidates"]
                                             if c["id"] == analysis["end_card_id"]),

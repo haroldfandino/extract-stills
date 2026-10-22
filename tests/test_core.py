@@ -317,7 +317,8 @@ def test_vfr_analysis_selection_and_refinement_keep_source_ids(tmp_path, ffmpeg,
         assert candidate["timestamp"] == pytest.approx(index * index * 0.04, abs=0.001)
         assert candidate["pts"] == analysis["video"]["frames"][index]["pts"]
         assert (Path(analysis["analysis_dir"]) / candidate["preview"]).is_file()
-    assert len(analysis["selected_ids"]) == 3
+    assert len(analysis["selected_ids"]) == len(analysis["shots"]) == 1
+    assert analysis["target"] == 1, "A count cap must not pad a continuous shot"
     result = core.export_analysis(analysis, Options())
     for item in result["files"]:
         np.testing.assert_allclose(read_pixels(item["path"]), frames[item["frame_index"]], atol=1)
@@ -360,7 +361,7 @@ def test_black_tail_cannot_become_reserved_ending(tmp_path, ffmpeg, neutral_visi
     assert analysis["end_card_id"] is not None and analysis["end_card_id"] < 42
     assert analysis["selected_ids"][-1] == analysis["end_card_id"]
     assert len(analysis["selected_ids"]) == 1
-    assert any("target" in warning.lower() for warning in analysis["warnings"])
+    assert analysis["target"] == len(analysis["shots"]) == 1
 
 
 def test_corrupt_missing_and_invalid_options_fail_without_success_artifacts(tmp_path, ffmpeg, neutral_vision):
@@ -412,7 +413,7 @@ def test_cancellation_stops_analysis_and_closes_model(tmp_path, ffmpeg, neutral_
     cancelled = threading.Event()
 
     def progress(stage, done, total):
-        if stage == "Scanning scenes" and done > 0:
+        if stage == "Scanning shots" and done > 0:
             cancelled.set()
 
     with pytest.raises(CancelledError):

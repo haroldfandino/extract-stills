@@ -1,3 +1,3 @@
-"""Offline, scene-aware video still extraction."""
+"""Offline, shot-aware video still extraction."""
 
-__version__ = "2.0.0b3"
+__version__ = "2.0.0b4"
